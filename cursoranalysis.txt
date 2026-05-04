@@ -1,0 +1,249 @@
+JudgeAI - Cursor Analysis and Feature Inventory
+Generated: 2026-05-02
+
+============================================================
+1) PROJECT OVERVIEW
+============================================================
+JudgeAI is a full-stack legal workflow platform that:
+- accepts court judgment PDF uploads,
+- extracts structured legal actions with Groq LLaMA,
+- supports human verification (approve/edit/reject),
+- tracks all review actions through audit logs,
+- provides role-based dashboards for officer and admin users.
+
+Stack:
+- Backend: FastAPI + Supabase (PostgreSQL + Storage)
+- Frontend: React (Vite) + Tailwind + React Router
+- Charts: Recharts
+- AI: Groq LLaMA extraction pipeline
+
+
+============================================================
+2) BACKEND FEATURES
+============================================================
+2.1 API Application
+- FastAPI app entry in backend/main.py
+- CORS enabled for local frontend origins
+- Router modules mounted under /api
+
+2.2 Configuration
+- Environment loading via python-dotenv in backend/config.py
+- Supports:
+  SUPABASE_URL
+  SUPABASE_KEY
+  SUPABASE_STORAGE_BUCKET
+  GROQ_API_KEY
+- Singleton Supabase client helper
+
+2.3 Upload Pipeline
+Endpoint: POST /api/upload-pdf
+- Validates PDF file type
+- Uploads to Supabase storage bucket
+- Generates case number
+- Stores case metadata in cases table
+- Returns public file URL and metadata
+
+2.4 PDF Parsing
+Service: backend/services/pdf_parser.py
+- Primary extraction using PyMuPDF
+- OCR fallback using EasyOCR if text is insufficient
+- Supports extraction from path and URL
+
+2.5 LLM Extraction
+Endpoint: POST /api/extract-actions
+Service: backend/services/llm_extractor.py
+- Sends extracted text to Groq model
+- Enforces JSON-only parsing strategy
+- Extracts:
+  case_number
+  judgment_date
+  department
+  deadline
+  directive
+  confidence_score
+  source_sentence
+- Stores results in extracted_actions table with pending status
+
+2.6 Verification Workflows
+Endpoints:
+- POST /api/approve-action/{id}
+- POST /api/edit-action/{id}
+- POST /api/reject-action/{id}
+
+Behavior:
+- approve -> status=approved + audit log
+- edit -> status=edited + field updates + human_verified_values snapshot + audit logs
+- reject -> status=rejected + rejection reason + audit log
+
+2.7 Audit Logging
+Utility: backend/utils/audit_logger.py
+- reusable log_audit_event()
+- per-case timeline retrieval
+- aggregate stats helper
+
+2.8 Deadline Engine
+Utility: backend/utils/deadline_helper.py
+- calculate_deadline_remaining()
+- priority levels: urgent, warning, normal, overdue
+- imminent-deadline helper for dashboards
+
+2.9 Dashboards API
+Officer endpoint: GET /api/officer-dashboard
+- pending/approved/completed counts
+- urgent deadlines count
+- recent uploads
+- optional department filter
+
+Admin endpoint: GET /api/admin-dashboard
+- total cases
+- status distribution
+- deadline alerts
+- department stats
+- verification counts
+- recent audit activities
+- verification trend data (7-day buckets)
+- cases processed per department summary
+
+2.10 Cases APIs
+- GET /api/cases with pagination and filters:
+  status, department, case_number
+- GET /api/cases/{action_id}:
+  full extracted action + deadline info + audit logs
+
+2.11 Database Schema and Security
+Schema file: backend/db_schema.sql
+- tables: users, cases, extracted_actions, audit_logs, verification_queue, notifications
+- indexes for key query paths
+- RLS policies for role/department scoping
+- updated_at triggers and dashboard views
+
+2.12 Auth/User Seeding Script
+Script: backend/scripts/seed_supabase_users.py
+- creates Supabase auth users:
+  admin@judgeai.local / admin123
+  officer@judgeai.local / officer123
+- upserts role profiles in public.users
+- uses SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY fallback)
+
+
+============================================================
+3) FRONTEND FEATURES
+============================================================
+3.1 App Foundation
+- Vite + React app bootstrap
+- Global Tailwind styles and design tokens
+- Toast system integrated globally
+
+3.2 Authentication and Roles
+- Dual login UI (Officer/Admin) in LoginPage
+- Supabase sign-in integration with session restore
+- role resolution from users profile + fallback rules
+- local fallback credentials for non-seeded environments
+- logout flow + auth loading gate
+
+3.3 Protected Routing and Redirects
+- Route guards for authenticated access
+- role-specific route protection
+- root redirect by role
+- unauthorized role attempts auto-redirected
+
+Protected route map:
+- /upload (authenticated)
+- /verification (officer/admin)
+- /officer-dashboard (officer/admin)
+- /case/:id (officer/admin)
+- /admin-dashboard (admin only)
+
+3.4 Code Splitting and Performance
+- Route-level lazy loading using React.lazy + Suspense
+- shared route loader spinner
+
+3.5 Upload Experience
+Component: UploadCard
+- drag-and-drop + click upload
+- single-PDF restriction
+- upload progress bar
+- extraction status states
+- success/failure toasts
+- extraction results callback pipeline
+
+3.6 Home / Landing UX
+- hero section
+- CTA and stats bar
+- upload section and extracted results section
+- styled footer
+
+3.7 Verification UI
+- pending case list
+- confidence score visual
+- case fields view/edit forms
+- source sentence display
+- actions: approve/edit/reject with API integration
+
+3.8 Officer Dashboard UI
+- KPI cards
+- department dropdown filter
+- case number search
+- recent uploads table
+- pending verification queue panel
+- deadline urgency badges/countdown chips
+
+3.9 Admin Dashboard UI
+- KPI cards
+- Recharts visual analytics:
+  pie chart for status distribution
+  bar chart for verification stats
+  department processing chart
+  verification trend line chart
+- deadline alerts list
+
+3.10 Case Details Page
+- loads real data via /api/cases/{id}
+- status and confidence display
+- AI-extracted values
+- human_verified_values display
+- source sentence block
+- embedded PDF viewer
+- audit timeline log
+
+3.11 Visual/Responsive Alignment
+- consistent page shell with fixed navbar spacing
+- responsive card/table/chart behavior
+- improved mobile wrapping for action bars and alert cards
+
+
+============================================================
+4) OPERATIONAL NOTES
+============================================================
+4.1 Local Run (typical)
+- Backend: uvicorn backend.main:app --reload
+- Frontend: npm run dev (inside frontend)
+
+4.2 Required Environment
+- Backend .env should include Supabase + Groq keys
+- Frontend .env should include VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
+
+4.3 Seeding Demo Users
+- Run:
+  python backend/scripts/seed_supabase_users.py
+
+
+============================================================
+5) COMPLETION STATUS AGAINST PROMPT CHAIN
+============================================================
+Implemented:
+- project architecture, dependencies, config, upload, parser, extraction, verification endpoints,
+  audit log helper, officer/admin dashboard APIs, deadline helper, schema with RLS,
+  frontend pages, role routing, confidence UI, source sentence support, case details wiring,
+  dashboard analytics (Recharts), and dual-login role flow.
+
+Practical note:
+- Groq model used is the currently active model variant in code, while preserving the required
+  extraction contract and JSON-only behavior.
+
+
+============================================================
+6) SUMMARY
+============================================================
+JudgeAI currently provides an end-to-end workflow from PDF ingestion to AI extraction,
+human verification, auditability, and role-based decision dashboards with analytics.
