@@ -11,6 +11,7 @@ import tempfile
 import fitz  # PyMuPDF
 import requests
 import easyocr
+import numpy as np
 
 # ── Configuration ────────────────────────────────
 TEXT_LENGTH_THRESHOLD = 100  # chars; below this → fallback to OCR
@@ -59,19 +60,13 @@ def extract_text_easyocr(pdf_path: str) -> str:
     end = min(page_count, MAX_PARSE_PAGES if MAX_PARSE_PAGES > 0 else page_count)
     for page_num in range(end):
         page = doc[page_num]
-        # Render page to a high-res pixmap
-        pix = page.get_pixmap(dpi=OCR_DPI)
-        img_path = os.path.join(
-            tempfile.gettempdir(), f"judgeai_ocr_page_{page_num}.png"
-        )
-        pix.save(img_path)
-
-        # Run OCR on the rendered image
-        results = reader.readtext(img_path, detail=0)
-        text_parts.extend(results)
-
-        # Clean up temp image
-        os.remove(img_path)
+        # Render page to a high-res pixmap and run OCR in-memory (avoid temp PNG I/O).
+        pix = page.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csRGB)
+        n = pix.n  # channels (usually 3 for RGB)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, n)
+        results = reader.readtext(img, detail=0)
+        if results:
+            text_parts.extend(results)
 
     doc.close()
     return "\n".join(text_parts).strip()
@@ -134,6 +129,72 @@ def extract_structured_blocks(pdf_path: str) -> list:
     return blocks_out
 
 
+def extract_pdf_bundle_from_path(pdf_path: str) -> tuple:
+    """
+    Extract (text, layout_blocks) in a single pass over the PDF.
+
+    - Uses PyMuPDF text for speed.
+    - Falls back to EasyOCR (in-memory) if extracted text is insufficient (scanned PDFs).
+    """
+    blocks_out = []
+    text_parts = []
+
+    doc = fitz.open(pdf_path)
+    try:
+        page_count = len(doc)
+        end = min(page_count, MAX_PARSE_PAGES if MAX_PARSE_PAGES > 0 else page_count)
+
+        for page_ix in range(end):
+            page = doc.load_page(page_ix)
+
+            # Fast text
+            t = page.get_text()
+            if t:
+                text_parts.append(t)
+
+            # Layout blocks
+            page_dict = page.get_text("dict")
+            for blk in page_dict.get("blocks", []):
+                if blk.get("type") != 0:
+                    continue
+                parts = []
+                for line in blk.get("lines", []):
+                    parts.append("".join(span.get("text", "") for span in line.get("spans", [])))
+                text = " ".join(s for s in parts if s).strip()
+                if not text:
+                    continue
+                bb = blk.get("bbox")
+                if not bb:
+                    continue
+                blocks_out.append(
+                    {
+                        "page_number": page_ix + 1,
+                        "text": text,
+                        "bbox": [float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3])],
+                    }
+                )
+
+        text = "\n".join(text_parts).strip()
+
+        # OCR fallback (scanned/image-heavy docs)
+        if len(text) < TEXT_LENGTH_THRESHOLD:
+            reader = _get_ocr_reader()
+            ocr_parts = []
+            for page_ix in range(end):
+                page = doc.load_page(page_ix)
+                pix = page.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csRGB)
+                n = pix.n
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, n)
+                results = reader.readtext(img, detail=0)
+                if results:
+                    ocr_parts.extend(results)
+            text = "\n".join(ocr_parts).strip()
+
+        return text, blocks_out
+    finally:
+        doc.close()
+
+
 def extract_pdf_bundle_from_url(pdf_url: str) -> tuple:
     """Download PDF once; return (full_text, layout_blocks)."""
     response = requests.get(pdf_url, timeout=REQUEST_TIMEOUT_SEC)
@@ -143,8 +204,7 @@ def extract_pdf_bundle_from_url(pdf_url: str) -> tuple:
     tmp.close()
     path = tmp.name
     try:
-        text = extract_text_from_path(path)
-        blocks = extract_structured_blocks(path)
+        text, blocks = extract_pdf_bundle_from_path(path)
         return text, blocks
     finally:
         os.unlink(path)

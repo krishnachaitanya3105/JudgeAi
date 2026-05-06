@@ -74,10 +74,8 @@ export default function UploadCard({ onExtractionComplete }) {
       let poll = 0;
       let extractResult = null;
       while (poll < maxPolls) {
-        // eslint-disable-next-line no-await-in-loop
         await new Promise((resolve) => setTimeout(resolve, 2000));
         poll += 1;
-        // eslint-disable-next-line no-await-in-loop
         const st = await getExtractActionsStatus(queued.job_id);
         if (st.status === 'completed') {
           extractResult = st.result;

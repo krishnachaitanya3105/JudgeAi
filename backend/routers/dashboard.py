@@ -41,25 +41,33 @@ def government_dashboard_slices(actions: list) -> dict:
     upcoming_7: List[dict] = []
     dept_pending: dict = {}
 
+    seen_appeal = set()
+    seen_compliance = set()
+    seen_upcoming = set()
+
     for action in actions:
         ap = action.get("action_plan") or {}
         card = _action_snapshot(action)
+        case_num = action.get("case_number")
 
         ar = str(ap.get("appeal_recommended", "")).strip().upper()
-        if ar in {"YES", "REVIEW"} and len(appeal_cases) < 50:
+        if ar in {"YES", "REVIEW"} and len(appeal_cases) < 50 and case_num not in seen_appeal:
             appeal_cases.append(card)
+            seen_appeal.add(case_num)
 
-        if ap.get("action_type") == "COMPLIANCE_REQUIRED" and len(compliance_cases) < 50:
+        if ap.get("action_type") == "COMPLIANCE_REQUIRED" and len(compliance_cases) < 50 and case_num not in seen_compliance:
             compliance_cases.append(card)
+            seen_compliance.add(case_num)
 
         dl_raw = ap.get("compliance_deadline") or action.get("deadline")
-        if dl_raw:
+        if dl_raw and case_num not in seen_upcoming:
             info = calculate_deadline_remaining(str(dl_raw))
             dr = info.get("days_remaining")
             if dr is not None and 0 <= dr <= 7 and len(upcoming_7) < 50:
                 row = dict(card)
                 row["days_remaining"] = dr
                 upcoming_7.append(row)
+                seen_upcoming.add(case_num)
 
         if action.get("status") == "pending":
             dk = str(ap.get("department") or action.get("department") or "Unknown")
@@ -220,11 +228,14 @@ async def get_officer_dashboard(department: Optional[str] = None):
     supabase = get_supabase()
 
     try:
-        actions_query = supabase.table("extracted_actions").select("*")
+        actions_query = supabase.table("extracted_actions").select(
+            "id,status,deadline,department"
+        )
         if department:
             actions_query = actions_query.eq("department", department)
         actions_response = actions_query.execute()
         actions = actions_response.data if actions_response.data else []
+        total_extracted = len(actions)
 
         pending_count = sum(1 for a in actions if a.get("status") == "pending")
         approved_count = sum(1 for a in actions if a.get("status") == "approved")
@@ -236,7 +247,9 @@ async def get_officer_dashboard(department: Optional[str] = None):
             if deadline and is_deadline_imminent(deadline):
                 urgent_count += 1
 
-        cases_query = supabase.table("cases").select("*")
+        cases_query = supabase.table("cases").select(
+            "id,case_number,pdf_url,uploaded_by,created_at,department"
+        )
         if department:
             cases_query = cases_query.eq("department", department)
         cases_response = cases_query.order("created_at", desc=True).limit(5).execute()
@@ -244,25 +257,25 @@ async def get_officer_dashboard(department: Optional[str] = None):
 
         # Attach extracted action id for each recent case so UI can open /case/{action_id}.
         if recent_uploads:
-            case_numbers = [r.get("case_number") for r in recent_uploads if r.get("case_number")]
-            if case_numbers:
+            pdf_urls = [r.get("pdf_url") for r in recent_uploads if r.get("pdf_url")]
+            if pdf_urls:
                 try:
                     actions_resp = (
                         supabase.table("extracted_actions")
-                        .select("id,case_number,created_at")
-                        .in_("case_number", case_numbers)
+                        .select("id,pdf_url,created_at")
+                        .in_("pdf_url", pdf_urls)
                         .order("created_at", desc=True)
                         .execute()
                     )
-                    actions = actions_resp.data or []
-                    action_id_by_case: Dict[str, str] = {}
-                    for a in actions:
-                        cn = a.get("case_number")
-                        if cn and cn not in action_id_by_case:
-                            action_id_by_case[cn] = a.get("id")
+                    action_rows = actions_resp.data or []
+                    action_id_by_url: Dict[str, str] = {}
+                    for a in action_rows:
+                        url = a.get("pdf_url")
+                        if url and url not in action_id_by_url:
+                            action_id_by_url[url] = a.get("id")
                     for row in recent_uploads:
-                        cn = row.get("case_number")
-                        row["action_id"] = action_id_by_case.get(cn) or ""
+                        url = row.get("pdf_url")
+                        row["action_id"] = action_id_by_url.get(url) or ""
                 except Exception:
                     for row in recent_uploads:
                         row["action_id"] = ""
@@ -275,7 +288,7 @@ async def get_officer_dashboard(department: Optional[str] = None):
             approved_cases=approved_count,
             completed_cases=completed_count,
             urgent_deadlines=urgent_count,
-            total_extracted=len(actions),
+            total_extracted=total_extracted,
             recent_uploads=recent_uploads,
         )
 
@@ -291,11 +304,17 @@ async def get_admin_dashboard():
     supabase = get_supabase()
 
     try:
-        cases_response = supabase.table("cases").select("*").execute()
+        cases_response = supabase.table("cases").select("id").execute()
         all_cases = cases_response.data if cases_response.data else []
         total_cases = len(all_cases)
 
-        actions_response = supabase.table("extracted_actions").select("*").execute()
+        actions_response = (
+            supabase.table("extracted_actions")
+            .select(
+                "id,case_number,department,deadline,directive,status,action_plan,action_plan_reasoning"
+            )
+            .execute()
+        )
         all_actions = actions_response.data if actions_response.data else []
 
         gov = government_dashboard_slices(all_actions)
@@ -321,16 +340,20 @@ async def get_admin_dashboard():
             dept_stats[dept][st] = dept_stats[dept].get(st, 0) + 1
 
         deadline_alerts = []
+        seen_alert_cases = set()
         for action in all_actions:
             deadline = action.get("deadline")
-            if deadline and is_deadline_imminent(deadline):
+            case_num = action.get("case_number")
+            if deadline and case_num and case_num not in seen_alert_cases and is_deadline_imminent(deadline):
                 deadline_info = calculate_deadline_remaining(deadline)
                 deadline_alerts.append({
-                    "case_number": action.get("case_number"),
+                    "action_id": action.get("id"),
+                    "case_number": case_num,
                     "deadline": deadline,
                     "days_remaining": deadline_info["days_remaining"],
                     "priority": deadline_info["priority_level"],
                 })
+                seen_alert_cases.add(case_num)
 
         deadline_alerts.sort(
             key=lambda x: x["days_remaining"]
@@ -347,7 +370,7 @@ async def get_admin_dashboard():
 
         audit_response = (
             supabase.table("audit_logs")
-            .select("*")
+            .select("id,action_type,edited_by,old_value,new_value,timestamp")
             .order("timestamp", desc=True)
             .limit(10)
             .execute()
@@ -575,3 +598,137 @@ async def get_case_details(action_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Case details fetch failed: {str(e)}")
+
+
+@router.get("/cases/{action_id}/analytics")
+async def get_case_analytics(action_id: str):
+    """Get comprehensive analytics for an approved/extracted case, similar to post-upload display."""
+    supabase = get_supabase()
+    try:
+        action_resp = (
+            supabase.table("extracted_actions")
+            .select("*")
+            .eq("id", action_id)
+            .limit(1)
+            .execute()
+        )
+        if not action_resp.data:
+            raise HTTPException(status_code=404, detail="Case/action not found")
+        
+        action = action_resp.data[0]
+        ap = action.get("action_plan") or {}
+        reasoning = action.get("action_plan_reasoning") or {}
+        
+        # Build confidence score using same logic as frontend
+        def coerce_fused_score():
+            r = reasoning.get("final_action_plan_confidence")
+            if isinstance(r, (int, float)) and not isinstance(r, bool) and not __import__('math').isnan(float(r)):
+                return min(1, max(0, float(r)))
+            if r is not None and r != "":
+                try:
+                    n = float(r)
+                    return min(1, max(0, n))
+                except (TypeError, ValueError):
+                    pass
+            ac = ap.get("confidence_score")
+            if ac is not None and ac != "":
+                try:
+                    n = float(ac) if isinstance(ac, (int, float)) else float(ac)
+                    return min(1, max(0, n))
+                except (TypeError, ValueError):
+                    pass
+            ec = action.get("confidence_score")
+            if ec is not None and ec != "":
+                try:
+                    n = float(ec) if isinstance(ec, (int, float)) else float(ec)
+                    return min(1, max(0, n))
+                except (TypeError, ValueError):
+                    pass
+            return 0
+        
+        fused_score = coerce_fused_score()
+        
+        # Build fusion subsystem analytics
+        effMap = reasoning.get("fusion_inputs_effective_clamped01") or {}
+        wMap = reasoning.get("weights") or {}
+        contribMap = reasoning.get("weighted_contribution") or {}
+        impMap = reasoning.get("subsystem_imputed_default") or {}
+        
+        fusion_rows = []
+        keys = ["llm", "timeline", "department", "appeal"]
+        raw_cols = {
+            "llm": "llm_confidence_raw",
+            "timeline": "timeline_confidence_raw",
+            "department": "department_classifier_confidence_raw",
+            "appeal": "appeal_classifier_confidence_raw",
+        }
+        
+        for key in keys:
+            row = {
+                "key": key,
+                "label": {
+                    "llm": "LLM extraction",
+                    "timeline": "Timeline parser",
+                    "department": "Department classifier",
+                    "appeal": "Appeal recommender",
+                }.get(key),
+                "effective": effMap.get(key),
+                "weight": wMap.get(key),
+                "contribution": contribMap.get(f"{key}_weighted"),
+                "raw": reasoning.get(raw_cols[key]),
+                "imputed": impMap.get(key, False),
+            }
+            fusion_rows.append(row)
+        
+        # Get audit logs
+        audit_resp = (
+            supabase.table("audit_logs")
+            .select("*")
+            .eq("case_id", action_id)
+            .order("timestamp", desc=True)
+            .execute()
+        )
+        audit_logs = audit_resp.data if audit_resp.data else []
+        
+        # Calculate verification metrics
+        approval_log = next((log for log in audit_logs if log.get("action_type") in ["approval", "status_change"]), None)
+        approval_timestamp = approval_log.get("timestamp") if approval_log else action.get("updated_at")
+        
+        # Build response with analytics
+        return {
+            "action_id": action_id,
+            "status": action.get("status"),
+            "case_number": action.get("case_number"),
+            "department": ap.get("department") or action.get("department"),
+            "judgment_date": action.get("judgment_date"),
+            "directive": action.get("directive"),
+            "confidence_score": fused_score,
+            "confidence_label": "HIGH" if fused_score >= 0.8 else "MEDIUM" if fused_score >= 0.6 else "LOW",
+            "action_plan": ap,
+            "reasoning": reasoning,
+            "fusion_analytics": {
+                "final_score": fused_score,
+                "subsystems": fusion_rows,
+                "has_reasoning": bool(reasoning),
+            },
+            "audit_logs": audit_logs[:20],
+            "approval_info": {
+                "status": action.get("status"),
+                "approved_by": approval_log.get("user_email") if approval_log else None,
+                "approved_at": approval_timestamp,
+                "created_at": action.get("created_at"),
+                "updated_at": action.get("updated_at"),
+            },
+            "metadata": {
+                "priority_level": ap.get("priority_level"),
+                "action_type": ap.get("action_type"),
+                "appeal_recommended": ap.get("appeal_recommended"),
+                "compliance_deadline": ap.get("compliance_deadline"),
+                "appeal_deadline": ap.get("appeal_deadline"),
+            },
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Case analytics fetch failed: {str(e)}")

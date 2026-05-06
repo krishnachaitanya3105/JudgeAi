@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { KeyRound, ShieldCheck, Scale, Sun, Moon, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../context/useAuth';
-import { useTheme } from '../context/ThemeContext';
+import { useTheme } from '../context/useTheme';
 
 const roleOptions = [
   {

@@ -6,6 +6,7 @@ with Supabase storage and structured data extraction.
 """
 
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,16 +36,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── CORS (explicit + regex for localhost/127.* any port dev) ─
+# ── CORS (dev + configurable prod) ─
+#
+# Env:
+# - CORS_ALLOW_ORIGINS="https://your-frontend.vercel.app,https://yourdomain.com"
+# - CORS_ALLOW_ORIGIN_REGEX="https://.*\\.vercel\\.app"
+cors_allow_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+extra = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+if extra:
+    cors_allow_origins.extend([o.strip() for o in extra.split(",") if o.strip()])
+
+cors_allow_origin_regex = os.getenv(
+    "CORS_ALLOW_ORIGIN_REGEX",
+    r"http://(localhost|127\.0\.0\.1):\d+|https://.*\.vercel\.app",
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origins=cors_allow_origins,
+    allow_origin_regex=cors_allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

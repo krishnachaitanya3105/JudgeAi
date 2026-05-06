@@ -18,13 +18,19 @@ and parses the structured JSON response containing:
 
 import json
 import re
+import time
 import httpx
 
 from backend.config import GROQ_API_KEY
 
 # ── Groq API Configuration ──────────────────────
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"  # Updated: This is the currently active model
+GROQ_MODEL = "llama-3.3-70b-versatile"  # Default; override via env when needed
+GROQ_MODEL_ENV = "JUDGEAI_GROQ_MODEL"
+GROQ_MAX_CHARS_ENV = "JUDGEAI_LLM_MAX_CHARS"
+GROQ_MAX_TOKENS_ENV = "JUDGEAI_LLM_MAX_TOKENS"
+GROQ_RETRIES_ENV = "JUDGEAI_LLM_RETRIES"
+GROQ_TIMEOUT_ENV = "JUDGEAI_LLM_TIMEOUT_SEC"
 
 # ── System Prompt ────────────────────────────────
 SYSTEM_PROMPT = """You are a legal governance assistant.
@@ -95,12 +101,17 @@ def extract_judgment_actions(judgment_text: str) -> dict:
         httpx.HTTPStatusError: If the Groq API returns an error.
     """
     # Truncate very long texts to stay within context window
-    max_chars = 24_000
+    max_chars = int(__import__("os").getenv(GROQ_MAX_CHARS_ENV, "24000"))
     if len(judgment_text) > max_chars:
         judgment_text = judgment_text[:max_chars] + "\n\n[...truncated...]"
 
+    model = __import__("os").getenv(GROQ_MODEL_ENV, GROQ_MODEL)
+    max_tokens = int(__import__("os").getenv(GROQ_MAX_TOKENS_ENV, "1024"))
+    retries = int(__import__("os").getenv(GROQ_RETRIES_ENV, "2"))
+    timeout_sec = float(__import__("os").getenv(GROQ_TIMEOUT_ENV, "60"))
+
     payload = {
-        "model": GROQ_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -112,7 +123,7 @@ def extract_judgment_actions(judgment_text: str) -> dict:
             },
         ],
         "temperature": 0.1,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
     }
 
     headers = {
@@ -120,15 +131,30 @@ def extract_judgment_actions(judgment_text: str) -> dict:
         "Content-Type": "application/json",
     }
 
-    with httpx.Client(timeout=60.0) as client:
-        try:
-            response = client.post(GROQ_API_URL, json=payload, headers=headers)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            error_body = e.response.text
-            raise ValueError(
-                f"Groq API error {e.response.status_code}: {error_body}"
-            )
+    last_err = None
+    with httpx.Client(timeout=timeout_sec) as client:
+        for attempt in range(retries + 1):
+            try:
+                response = client.post(GROQ_API_URL, json=payload, headers=headers)
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as e:
+                last_err = e
+                code = e.response.status_code
+                # Retry on rate-limit / transient backend failures.
+                if attempt < retries and code in {408, 409, 425, 429, 500, 502, 503, 504}:
+                    time.sleep(0.6 * (2**attempt))
+                    continue
+                error_body = e.response.text
+                raise ValueError(f"Groq API error {code}: {error_body}")
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_err = e
+                if attempt < retries:
+                    time.sleep(0.6 * (2**attempt))
+                    continue
+                raise ValueError(f"Groq API request failed: {str(e)}")
+        else:
+            raise ValueError(f"Groq API request failed: {str(last_err)}")
 
     data = response.json()
     raw_content = data["choices"][0]["message"]["content"]

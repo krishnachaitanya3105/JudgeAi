@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   AlertCircle,
   BarChart3,
-  TrendingDown,
   Users,
   Download,
   Calendar,
@@ -25,8 +25,6 @@ import {
   PieChart,
   Pie,
   Cell,
-  LineChart,
-  Line,
   CartesianGrid,
   Legend,
   Area,
@@ -35,7 +33,6 @@ import {
 import StatCard from '../components/ui/StatCard';
 import StatusChip from '../components/ui/StatusChip';
 import ChartTooltip from '../components/ui/ChartTooltip';
-import EmptyState from '../components/ui/EmptyState';
 import { SkeletonCard } from '../components/ui/Skeleton';
 
 const CHART_COLORS = {
@@ -480,7 +477,15 @@ export default function AdminDashboard() {
                 >
                   {row.case_number !== undefined ? (
                     <>
-                      <div style={{ fontWeight: 600 }}>{row.case_number}</div>
+                      <div style={{ fontWeight: 600 }}>
+                        {row.id ? (
+                          <Link to={`/case/${row.id}`} style={{ color: 'inherit', textDecoration: 'none' }}>
+                            {row.case_number}
+                          </Link>
+                        ) : (
+                          row.case_number
+                        )}
+                      </div>
                       <div style={{ fontSize: 11, marginTop: 4 }}>{row.directive}</div>
                       {row.deadline !== undefined ? (
                         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
@@ -779,47 +784,58 @@ export default function AdminDashboard() {
           <div className="card" style={{ marginBottom: 40 }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 300, overflowY: 'auto' }}>
               {dashboard.deadline_alerts.map((alert, idx) => (
-                <div
+                <Link
                   key={idx}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '14px 16px',
-                    borderRadius: 'var(--radius-md)',
-                    border: `1px solid ${alert.priority === 'urgent' ? 'var(--danger)' : 'var(--warning)'}`,
-                    background: alert.priority === 'urgent' ? 'var(--danger-muted)' : 'var(--warning-muted)',
-                    flexWrap: 'wrap',
-                    gap: 8,
+                  to={alert.action_id ? `/case/${alert.action_id}` : '#'}
+                  onClick={(e) => {
+                    if (!alert.action_id) e.preventDefault();
                   }}
+                  style={{ textDecoration: 'none' }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <AlertCircle
-                      size={18}
-                      style={{
-                        color: alert.priority === 'urgent' ? 'var(--danger)' : 'var(--warning)',
-                      }}
-                    />
-                    <div>
-                      <p style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 14 }}>
-                        {alert.case_number}
-                      </p>
-                      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                        <Calendar size={10} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
-                        {alert.deadline}
-                      </p>
-                    </div>
-                  </div>
-                  <span
+                  <div
                     style={{
-                      fontSize: 13,
-                      fontWeight: 700,
-                      color: alert.priority === 'urgent' ? 'var(--danger-text)' : 'var(--warning-text)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '14px 16px',
+                      borderRadius: 'var(--radius-md)',
+                      border: `1px solid ${['urgent', 'overdue'].includes(alert.priority) ? 'var(--danger)' : 'var(--warning)'}`,
+                      background: ['urgent', 'overdue'].includes(alert.priority) ? 'var(--danger-muted)' : 'var(--warning-muted)',
+                      flexWrap: 'wrap',
+                      gap: 8,
+                      cursor: alert.action_id ? 'pointer' : 'default',
                     }}
                   >
-                    {alert.days_remaining} days remaining
-                  </span>
-                </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <AlertCircle
+                        size={18}
+                        style={{
+                          color: ['urgent', 'overdue'].includes(alert.priority) ? 'var(--danger)' : 'var(--warning)',
+                        }}
+                      />
+                      <div>
+                        <p style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 14 }}>
+                          {alert.case_number}
+                        </p>
+                        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                          <Calendar size={10} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
+                          {alert.deadline}
+                        </p>
+                      </div>
+                    </div>
+                    <span
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        color: ['urgent', 'overdue'].includes(alert.priority) ? 'var(--danger-text)' : 'var(--warning-text)',
+                      }}
+                    >
+                      {alert.days_remaining < 0
+                        ? `${Math.abs(alert.days_remaining)} days overdue`
+                        : `${alert.days_remaining} days remaining`}
+                    </span>
+                  </div>
+                </Link>
               ))}
             </div>
           </div>

@@ -139,6 +139,8 @@ def is_deadline_imminent(deadline_date: str, threshold_hours: int = 72) -> bool:
         True if deadline is within threshold and not overdue.
     """
     info = calculate_deadline_remaining(deadline_date)
+    if info["is_overdue"] is None or info["hours_remaining"] is None:
+        return False
     if info["is_overdue"]:
         return True  # Overdue is also "imminent" - needs attention
     return 0 <= info["hours_remaining"] <= threshold_hours

@@ -11,8 +11,9 @@ import {
   Scale,
   TrendingUp,
   MessageCircleQuestion,
+  BarChart3,
 } from 'lucide-react';
-import { getCaseDetails } from '../lib/api';
+import { getCaseDetails, getCaseAnalytics } from '../lib/api';
 import toast from 'react-hot-toast';
 import ConfidenceGauge from '../components/ui/ConfidenceGauge';
 import JudgmentPdfPanel from '../components/JudgmentPdfPanel';
@@ -46,15 +47,29 @@ export default function CaseDetailsPage() {
   const [caseData, setCaseData] = useState(null);
   const [auditLog, setAuditLog] = useState([]);
   const [pdfHighlights, setPdfHighlights] = useState([]);
+  const [analytics, setAnalytics] = useState(null);
 
   useEffect(() => {
     const fetchDetails = async () => {
       setLoading(true);
       try {
-        const data = await getCaseDetails(id);
+        const [detailsRes, analyticsRes] = await Promise.allSettled([
+          getCaseDetails(id),
+          getCaseAnalytics(id),
+        ]);
+        if (detailsRes.status !== 'fulfilled') {
+          throw detailsRes.reason;
+        }
+        const data = detailsRes.value;
         setCaseData(data.action);
         setAuditLog(data.audit_logs || []);
         setPdfHighlights(Array.isArray(data.pdf_highlights) ? data.pdf_highlights : []);
+
+        if (analyticsRes.status === 'fulfilled') {
+          setAnalytics(analyticsRes.value);
+        } else {
+          console.log('Analytics not available:', analyticsRes.reason?.message);
+        }
       } catch (err) {
         toast.error(err.response?.data?.detail || 'Failed to load case details');
       } finally {
@@ -327,6 +342,75 @@ export default function CaseDetailsPage() {
               )}
             </div>
           </div>
+
+          {/* Analytics Card - NEW */}
+          {analytics && (
+            <div className="card">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                <BarChart3 size={18} style={{ color: 'var(--primary)' }} />
+                <h2 className="text-section-title" style={{ margin: 0 }}>Case Analytics</h2>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12, marginBottom: 20 }}>
+                <div style={{ padding: '12px', borderRadius: 'var(--radius-md)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
+                  <p className="text-caption" style={{ marginBottom: 4 }}>Status</p>
+                  <p style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)' }}>{analytics.status}</p>
+                </div>
+                <div style={{ padding: '12px', borderRadius: 'var(--radius-md)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
+                  <p className="text-caption" style={{ marginBottom: 4 }}>Confidence Level</p>
+                  <p style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)' }}>{analytics.confidence_label}</p>
+                </div>
+                <div style={{ padding: '12px', borderRadius: 'var(--radius-md)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
+                  <p className="text-caption" style={{ marginBottom: 4 }}>Action Type</p>
+                  <p style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)' }}>{analytics.metadata?.action_type || 'N/A'}</p>
+                </div>
+                <div style={{ padding: '12px', borderRadius: 'var(--radius-md)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
+                  <p className="text-caption" style={{ marginBottom: 4 }}>Priority</p>
+                  <p style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)' }}>{analytics.metadata?.priority_level || 'N/A'}</p>
+                </div>
+              </div>
+
+              {/* Fusion Analytics */}
+              {analytics.fusion_analytics?.has_reasoning && (
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border-subtle)' }}>
+                  <p className="text-caption" style={{ marginBottom: 12, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+                    Subsystem Confidence Breakdown
+                  </p>
+                  <div className="table-container" style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', fontSize: 12 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ textAlign: 'left', padding: '8px 6px', borderBottom: '1px solid var(--border-subtle)' }}>Subsystem</th>
+                          <th style={{ textAlign: 'right', padding: '8px 6px', borderBottom: '1px solid var(--border-subtle)' }}>Effective</th>
+                          <th style={{ textAlign: 'right', padding: '8px 6px', borderBottom: '1px solid var(--border-subtle)' }}>Weight</th>
+                          <th style={{ textAlign: 'right', padding: '8px 6px', borderBottom: '1px solid var(--border-subtle)' }}>Contribution</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {analytics.fusion_analytics?.subsystems?.map((row) => {
+                          const fmtExact = (v, places) => {
+                            if (v === null || v === undefined || v === '') return '—';
+                            const n = typeof v === 'number' ? v : Number(v);
+                            return Number.isNaN(n) ? String(v) : n.toFixed(places);
+                          };
+                          return (
+                            <tr key={row.key}>
+                              <td style={{ padding: '8px 6px', color: 'var(--text-primary)', fontWeight: 600 }}>{row.label}</td>
+                              <td style={{ padding: '8px 6px', textAlign: 'right', fontFamily: 'monospace', color: 'var(--text-secondary)' }}>{fmtExact(row.effective, 6)}</td>
+                              <td style={{ padding: '8px 6px', textAlign: 'right', fontFamily: 'monospace', color: 'var(--text-secondary)' }}>{fmtExact(row.weight, 4)}</td>
+                              <td style={{ padding: '8px 6px', textAlign: 'right', fontFamily: 'monospace', color: 'var(--text-secondary)' }}>{fmtExact(row.contribution, 6)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+                    Final score: <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>{analytics.confidence_score.toFixed(6)}</span>
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* PDF Viewer */}
           {caseData.pdf_url && (

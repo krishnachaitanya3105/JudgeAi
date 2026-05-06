@@ -4,7 +4,6 @@ import {
   Building2,
   Clock,
   FileText,
-  TrendingUp,
 } from 'lucide-react';
 import ConfidenceGauge from './ui/ConfidenceGauge';
 

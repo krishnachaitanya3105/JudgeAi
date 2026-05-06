@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   AlertCircle,
   Check,
@@ -13,7 +13,6 @@ import { getCases, approveAction, rejectAction, editAction } from '../lib/api';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/useAuth';
 import ConfidenceGauge from '../components/ui/ConfidenceGauge';
-import StatusChip from '../components/ui/StatusChip';
 import ConfirmModal from '../components/ui/ConfirmModal';
 import EmptyState from '../components/ui/EmptyState';
 import { SkeletonCard } from '../components/ui/Skeleton';
@@ -47,6 +46,17 @@ export default function VerificationPage() {
   }, []);
 
   // Keyboard shortcuts
+  const handleApprove = useCallback(async (caseItem) => {
+    try {
+      await approveAction(caseItem.id, user?.email || 'officer');
+      toast.success('Case approved successfully ✓');
+      setCases((prev) => prev.filter((c) => c.id !== caseItem.id));
+      setSelectedCase(null);
+    } catch {
+      toast.error('Failed to approve case');
+    }
+  }, [user]);
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (editMode || rejectModalOpen) return;
@@ -68,43 +78,32 @@ export default function VerificationPage() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedCase, editMode, rejectModalOpen]);
+  }, [selectedCase, editMode, rejectModalOpen, handleApprove]);
 
-  const handleApprove = async (caseItem) => {
-    try {
-      await approveAction(caseItem.id, user?.email || 'officer');
-      toast.success('Case approved successfully ✓');
-      setCases(cases.filter((c) => c.id !== caseItem.id));
-      setSelectedCase(null);
-    } catch {
-      toast.error('Failed to approve case');
-    }
-  };
-
-  const handleReject = async (reason) => {
+  async function handleReject(reason) {
     if (!selectedCase) return;
     try {
       await rejectAction(selectedCase.id, reason || 'Rejected by officer', user?.email || 'officer');
       toast.success('Case rejected');
-      setCases(cases.filter((c) => c.id !== selectedCase.id));
+      setCases((prev) => prev.filter((c) => c.id !== selectedCase.id));
       setSelectedCase(null);
       setRejectModalOpen(false);
     } catch {
       toast.error('Failed to reject case');
     }
-  };
+  }
 
-  const handleEdit = async (caseItem) => {
+  async function handleEdit(caseItem) {
     try {
       await editAction(caseItem.id, editData, user?.email || 'officer');
       toast.success('Case edited successfully');
-      setCases(cases.filter((c) => c.id !== caseItem.id));
+      setCases((prev) => prev.filter((c) => c.id !== caseItem.id));
       setEditMode(false);
       setSelectedCase(null);
     } catch {
       toast.error('Failed to edit case');
     }
-  };
+  }
 
   const filteredCases = searchTerm
     ? cases.filter((c) =>

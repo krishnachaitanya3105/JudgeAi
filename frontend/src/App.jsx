@@ -1,6 +1,6 @@
 import AppRouter from './router';
 import { Toaster } from 'react-hot-toast';
-import { useTheme } from './context/ThemeContext';
+import { useTheme } from './context/useTheme';
 import RealtimeNotifications from './components/RealtimeNotifications';
 
 export default function App() {

@@ -1,0 +1,146 @@
+JudgeAI — Project Brief (Full Stack + AI)
+========================================
+
+What problem this application solves (real world, real time)
+-----------------------------------------------------------
+Government departments and compliance officers receive court judgments that contain time-bound directives
+(submit reports, complete actions, file responses, comply within X days, etc.). Today this is mostly manual:
+reading long PDFs, extracting deadlines, deciding the responsible department, tracking compliance timelines,
+and keeping an audit trail of who approved/edited/rejected what.
+
+JudgeAI solves this in near real time by:
+- Ingesting judgment PDFs
+- Extracting structured fields (case number, judgment date, department, compliance deadline, directive, evidence sentence)
+- Generating a governance action plan and confidence score
+- Routing results into a verification queue for human approval/edit/reject
+- Publishing dashboards for officers/admins with deadline alerts and analytics
+- Keeping an audit log for accountability and compliance
+
+
+Core features (end-to-end)
+-------------------------
+1) PDF ingestion
+   - Single upload: POST /api/upload-pdf
+   - Batch upload: POST /api/upload-batch (frontend supports multi-select)
+   - Files are stored in Supabase Storage; metadata stored in Supabase Postgres tables.
+
+2) Document extraction + AI pipeline
+   - Text extraction: PyMuPDF (fast native text extraction)
+   - OCR fallback: EasyOCR for scanned/image-heavy PDFs
+   - LLM structured extraction (Groq chat-completions): case_number, judgment_date, department, deadline, directive, source_sentence, confidence_score
+   - Governance action plan generation (backend/services/action_plan_generator.py)
+   - Confidence fusion (multi-signal): combines LLM + timeline parser + department classifier + appeal recommender into a single “final confidence”
+
+3) Human verification workflow
+   - Verification queue page: approve/edit/reject
+   - Keyboard shortcuts (Approve/Edit/Reject)
+   - Updates write audit logs (who changed what, when)
+
+4) Dashboards (real-time operational views)
+   - Officer dashboard: personal/pending work + urgent deadlines
+   - Admin dashboard: system-wide analytics, verification stats, confidence fusion analytics, exports (CSV)
+   - Deadline alerts and “upcoming in 7 days” slices for proactive action
+
+5) Case detail review + explainability
+   - PDF highlight overlays (directive / deadlines / source sentence)
+   - “Why” sections from stored reasoning JSON (audit-grade explainability)
+   - Confidence transparency: subsystem raw/effective signals, weights, contributions, and imputation markers
+
+
+AI models and key AI components
+------------------------------
+LLM (Groq):
+- Default model: llama-3.3-70b-versatile (configured in backend/services/llm_extractor.py)
+- Output contract: strict JSON object (no markdown) for deterministic parsing
+- Tunables via env:
+  - JUDGEAI_GROQ_MODEL: choose a faster/smaller model if desired
+  - JUDGEAI_LLM_MAX_CHARS: max judgment text characters sent
+  - JUDGEAI_LLM_MAX_TOKENS: response token budget
+  - JUDGEAI_LLM_RETRIES: retry count on transient failures (429/5xx/timeouts)
+
+OCR:
+- EasyOCR is used only when native PDF text is insufficient (scanned documents).
+
+Embedding / retrieval (optional features already wired):
+- Sentence-transformers embeddings stored on the case row for search/semantic workflows.
+
+Confidence fusion:
+- A “final action plan confidence” is produced by combining multiple subsystem signals so the UI is not LLM-only.
+
+
+Performance and accuracy improvements applied (this update)
+----------------------------------------------------------
+Backend PDF parsing speed:
+- Converted PDF parsing to a single-pass function that extracts both:
+  - full text (PyMuPDF)
+  - layout blocks (for highlights)
+  in one document open, rather than reopening the PDF multiple times.
+
+OCR speed:
+- Removed per-page temporary PNG file writes for OCR.
+- OCR now runs in-memory on rendered page arrays (less disk I/O, faster per page).
+
+LLM robustness:
+- Added small, safe retry/backoff behavior for transient API failures (429/5xx/timeouts).
+- Added environment variables to tune model choice and limits without code changes.
+
+
+Tech stack
+----------
+Frontend:
+- React + Vite
+- React Router
+- Tailwind CSS utilities (project styling)
+- Recharts (dashboards)
+- Supabase JS client (admin/officer management)
+
+Backend:
+- FastAPI (Python)
+- Uvicorn (ASGI server)
+- Supabase Python client (Postgres + Storage)
+- PyMuPDF + EasyOCR (document processing)
+- Groq API (LLM extraction)
+
+Database:
+- Supabase Postgres
+- RLS policies (row-level security)
+- Tables: users, cases, extracted_actions, audit_logs, verification_queue, notifications
+
+
+How to run locally (Windows)
+----------------------------
+Backend:
+- From repo root:
+  uvicorn backend.main:app --reload --port 8000
+- API docs:
+  http://localhost:8000/docs
+
+Frontend:
+- From frontend folder:
+  npm install
+  npm run dev
+- UI:
+  http://localhost:5173/
+
+
+Key API endpoints (common)
+--------------------------
+- POST /api/upload-pdf
+- POST /api/extract-actions
+- POST /api/extract-actions-async
+- GET  /api/extract-actions-status/{job_id}
+- GET  /api/officer-dashboard
+- GET  /api/admin-dashboard
+- GET  /api/cases
+- GET  /api/cases/{action_id}
+- GET  /api/cases/{action_id}/analytics
+
+
+Why this matters (real-time governance impact)
+----------------------------------------------
+- Faster compliance response: immediate extraction of obligations and deadlines after judgment receipt
+- Reduced missed deadlines: dashboard alerts + prioritized queues
+- Stronger accountability: audit logs + transparent confidence/fusion reasoning
+- Scalable throughput: batch upload + async extraction jobs
+- Better accuracy with human-in-the-loop: officers verify and correct outputs, improving operational reliability
+
