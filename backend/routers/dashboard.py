@@ -4,7 +4,9 @@ Dashboard Router — Officer and Admin Dashboards
 Government decision widgets + case filters over action_plan payloads.
 """
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+import logging
 from statistics import mean, pstdev
 from typing import Any, Dict, List, Optional
 
@@ -14,9 +16,9 @@ from pydantic import BaseModel, Field
 from backend.config import get_supabase
 from backend.services.confidence_fusion import NEUTRAL_IMPUTATION, default_fusion_weights
 from backend.services.highlight_builder import layout_blocks_to_highlights
-from backend.services.pdf_parser import extract_pdf_bundle_from_url
 from backend.utils.deadline_helper import calculate_deadline_remaining, is_deadline_imminent
 
+logger = logging.getLogger("judgeai.dashboard")
 router = APIRouter()
 
 
@@ -302,92 +304,95 @@ async def get_officer_dashboard(department: Optional[str] = None):
 @router.get("/admin-dashboard", response_model=AdminDashboardResponse)
 async def get_admin_dashboard():
     supabase = get_supabase()
+    loop = asyncio.get_event_loop()
 
     try:
-        cases_response = supabase.table("cases").select("id").execute()
-        all_cases = cases_response.data if cases_response.data else []
-        total_cases = len(all_cases)
+        # ── Parallel DB fetches (previously 3 sequential round-trips) ─────
+        def _fetch_cases():
+            return supabase.table("cases").select("id").execute()
 
-        actions_response = (
-            supabase.table("extracted_actions")
-            .select(
-                "id,case_number,department,deadline,directive,status,action_plan,action_plan_reasoning"
+        def _fetch_actions():
+            return (
+                supabase.table("extracted_actions")
+                .select(
+                    "id,case_number,department,deadline,directive,status,"
+                    "action_plan,action_plan_reasoning"
+                )
+                .execute()
             )
-            .execute()
+
+        def _fetch_audit():
+            return (
+                supabase.table("audit_logs")
+                .select("id,action_type,edited_by,old_value,new_value,timestamp")
+                .order("timestamp", desc=True)
+                .limit(10)
+                .execute()
+            )
+
+        cases_resp, actions_resp, audit_resp = await asyncio.gather(
+            loop.run_in_executor(None, _fetch_cases),
+            loop.run_in_executor(None, _fetch_actions),
+            loop.run_in_executor(None, _fetch_audit),
         )
-        all_actions = actions_response.data if actions_response.data else []
+
+        all_cases   = cases_resp.data   or []
+        all_actions = actions_resp.data or []
+        total_cases = len(all_cases)
 
         gov = government_dashboard_slices(all_actions)
 
-        status_dist = {}
-        for action in all_actions:
-            status = action.get("status", "unknown")
-            status_dist[status] = status_dist.get(status, 0) + 1
+        status_dist: Dict[str, int] = {}
+        dept_stats:  Dict[str, Dict[str, int]] = {}
+        deadline_alerts: List[dict] = []
+        seen_alert_cases: set = set()
+        verification_counts = {"approved": 0, "rejected": 0, "edited": 0, "pending": 0}
 
-        dept_stats = {}
         for action in all_actions:
-            dept = action.get("department", "Unknown")
+            st   = action.get("status", "unknown")
+            dept = action.get("department") or "Unknown"
+
+            # status distribution
+            status_dist[st] = status_dist.get(st, 0) + 1
+
+            # department stats
             if dept not in dept_stats:
-                dept_stats[dept] = {
-                    "total": 0,
-                    "pending": 0,
-                    "approved": 0,
-                    "edited": 0,
-                    "rejected": 0,
-                }
+                dept_stats[dept] = {"total": 0, "pending": 0, "approved": 0,
+                                    "edited": 0, "rejected": 0}
             dept_stats[dept]["total"] += 1
-            st = action.get("status", "pending")
             dept_stats[dept][st] = dept_stats[dept].get(st, 0) + 1
 
-        deadline_alerts = []
-        seen_alert_cases = set()
-        for action in all_actions:
+            # verification counts
+            if st in verification_counts:
+                verification_counts[st] += 1
+
+            # deadline alerts
             deadline = action.get("deadline")
             case_num = action.get("case_number")
             if deadline and case_num and case_num not in seen_alert_cases and is_deadline_imminent(deadline):
                 deadline_info = calculate_deadline_remaining(deadline)
                 deadline_alerts.append({
-                    "action_id": action.get("id"),
-                    "case_number": case_num,
-                    "deadline": deadline,
+                    "action_id":     action.get("id"),
+                    "case_number":   case_num,
+                    "deadline":      deadline,
                     "days_remaining": deadline_info["days_remaining"],
-                    "priority": deadline_info["priority_level"],
+                    "priority":      deadline_info["priority_level"],
                 })
                 seen_alert_cases.add(case_num)
 
         deadline_alerts.sort(
-            key=lambda x: x["days_remaining"]
-            if x["days_remaining"] is not None
-            else 999
+            key=lambda x: x["days_remaining"] if x["days_remaining"] is not None else 999
         )
 
-        verification_counts = {
-            "approved": sum(1 for a in all_actions if a.get("status") == "approved"),
-            "rejected": sum(1 for a in all_actions if a.get("status") == "rejected"),
-            "edited": sum(1 for a in all_actions if a.get("status") == "edited"),
-            "pending": sum(1 for a in all_actions if a.get("status") == "pending"),
-        }
-
-        audit_response = (
-            supabase.table("audit_logs")
-            .select("id,action_type,edited_by,old_value,new_value,timestamp")
-            .order("timestamp", desc=True)
-            .limit(10)
-            .execute()
-        )
-        recent_activities = audit_response.data if audit_response.data else []
+        recent_activities = audit_resp.data or []
 
         today = datetime.now(timezone.utc).date()
-        trend_buckets = []
-        for i in range(6, -1, -1):
-            day = today - timedelta(days=i)
-            trend_buckets.append({
-                "date": day.isoformat(),
-                "approved": 0,
-                "edited": 0,
-                "rejected": 0,
-            })
-        day_index = {bucket["date"]: bucket for bucket in trend_buckets}
+        trend_buckets = [
+            {"date": (today - timedelta(days=i)).isoformat(),
+             "approved": 0, "edited": 0, "rejected": 0}
+            for i in range(6, -1, -1)
+        ]
+        day_index = {b["date"]: b for b in trend_buckets}
         for activity in recent_activities:
             ts = activity.get("timestamp")
             if not ts:
@@ -406,9 +411,9 @@ async def get_admin_dashboard():
         cases_processed_per_department = [
             {
                 "department": dept,
-                "total": stats.get("total", 0),
-                "approved": stats.get("approved", 0),
-                "pending": stats.get("pending", 0),
+                "total":      stats.get("total",    0),
+                "approved":   stats.get("approved", 0),
+                "pending":    stats.get("pending",  0),
             }
             for dept, stats in dept_stats.items()
         ]
@@ -432,6 +437,7 @@ async def get_admin_dashboard():
         )
 
     except Exception as e:
+        logger.error("admin-dashboard failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Admin dashboard fetch failed: {str(e)}")
 
 
@@ -478,11 +484,18 @@ async def get_cases(
     deadline_range_min_days: Optional[int] = None,
     deadline_range_max_days: Optional[int] = None,
 ):
-    """Filters on action_plan-backed fields applied in-process (demo-scale datasets)."""
+    """
+    Cases list with server-side filtering where possible.
+    action_plan-backed fields (priority_level, action_type, deadline_days) are
+    applied in-process after a capped DB fetch (max 2000 rows).
+    """
     supabase = get_supabase()
+    _DB_ROW_CAP = 2000  # hard ceiling to prevent OOM on large tables
 
     try:
         query = supabase.table("extracted_actions").select("*")
+
+        # Push supported filters to DB to shrink the result set before Python sees it
         if status:
             query = query.eq("status", status)
         if department:
@@ -490,29 +503,47 @@ async def get_cases(
         if case_number:
             query = query.ilike("case_number", f"%{case_number}%")
 
-        response = query.order("created_at", desc=True).execute()
+        response = (
+            query
+            .order("created_at", desc=True)
+            .limit(_DB_ROW_CAP)
+            .execute()
+        )
         rows = response.data or []
 
-        filtered = [
-            r
-            for r in rows
-            if _case_passes_filters(
-                r,
-                priority_level=priority_level,
-                action_type=action_type,
-                deadline_days_min=deadline_range_min_days,
-                deadline_days_max=deadline_range_max_days,
-            )
-        ]
-        slice_ = filtered[skip : skip + limit]
+        # In-process filter for action_plan-backed fields
+        needs_post_filter = any([
+            priority_level,
+            action_type,
+            deadline_range_min_days is not None,
+            deadline_range_max_days is not None,
+        ])
+
+        if needs_post_filter:
+            filtered = [
+                r for r in rows
+                if _case_passes_filters(
+                    r,
+                    priority_level=priority_level,
+                    action_type=action_type,
+                    deadline_days_min=deadline_range_min_days,
+                    deadline_days_max=deadline_range_max_days,
+                )
+            ]
+        else:
+            filtered = rows
+
+        slice_ = filtered[skip: skip + limit]
         return {
             "total": len(filtered),
             "data": slice_,
             "skip": skip,
             "limit": limit,
+            "capped": len(rows) >= _DB_ROW_CAP,  # signal to client if result may be truncated
         }
 
     except Exception as e:
+        logger.error("get_cases failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Cases fetch failed: {str(e)}")
 
 
@@ -555,17 +586,11 @@ async def get_case_details(action_id: str):
             )
             if cresp.data:
                 layout_blocks = cresp.data[0].get("layout_blocks")
-            # Legacy rows may miss layout_blocks; backfill lazily for highlight overlays.
+            # If layout_blocks are missing, return [] — the pipeline will
+            # backfill them on next extraction. Do NOT re-download the PDF
+            # inside a synchronous GET handler (OOM risk + blocks uvicorn thread).
             if not layout_blocks:
-                try:
-                    _txt, generated_blocks = extract_pdf_bundle_from_url(action["pdf_url"])
-                    layout_blocks = generated_blocks or []
-                    if layout_blocks:
-                        supabase.table("cases").update({"layout_blocks": layout_blocks}).eq(
-                            "pdf_url", action["pdf_url"]
-                        ).execute()
-                except Exception:
-                    layout_blocks = layout_blocks or []
+                layout_blocks = []
 
         ap = action.get("action_plan") or {}
         deadline_for_hl = ap.get("compliance_deadline") or action.get("deadline")

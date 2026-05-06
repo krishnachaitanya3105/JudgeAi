@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertCircle,
@@ -22,17 +22,28 @@ export default function OfficerDashboard() {
   const [dashboard, setDashboard] = useState(null);
   const [pendingCases, setPendingCases] = useState([]);
   const [departmentFilter, setDepartmentFilter] = useState('');
-  const [caseSearch, setCaseSearch] = useState('');
+  const [caseSearch, setCaseSearch] = useState('');       // raw input (unthrottled)
+  const [debouncedSearch, setDebouncedSearch] = useState(''); // debounced (used in API)
+  const searchTimerRef = useRef(null);
   const [error, setError] = useState('');
+
+  // Debounce caseSearch → debouncedSearch (350 ms)
+  useEffect(() => {
+    clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      setDebouncedSearch(caseSearch.trim());
+    }, 350);
+    return () => clearTimeout(searchTimerRef.current);
+  }, [caseSearch]);
 
   useEffect(() => {
     let cancelled = false;
     const fetchData = async () => {
       try {
-        // Parallel fetch: dashboard stats + pending cases (removed redundant 250-record fetch)
+        // Parallel fetch: dashboard stats + pending cases
         const [data, pendingData] = await Promise.all([
           getOfficerDashboard(departmentFilter || null),
-          getCases(0, 50, 'pending', departmentFilter || null, caseSearch || null),
+          getCases(0, 50, 'pending', departmentFilter || null, debouncedSearch || null),
         ]);
         if (cancelled) return;
         setDashboard(data);
@@ -49,7 +60,7 @@ export default function OfficerDashboard() {
 
     fetchData();
     return () => { cancelled = true; };
-  }, [departmentFilter, caseSearch]);
+  }, [departmentFilter, debouncedSearch]);
 
   const getDeadlineChip = (deadline) => {
     if (!deadline) return <span className="text-metadata">No deadline</span>;

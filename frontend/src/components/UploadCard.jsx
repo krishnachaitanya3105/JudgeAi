@@ -6,6 +6,7 @@ import {
   uploadBatchPdfs,
   extractActionsAsync,
   getExtractActionsStatus,
+  getCaseProcessingStatus,
 } from '../lib/api';
 import toast from 'react-hot-toast';
 
@@ -100,8 +101,10 @@ export default function UploadCard({ onExtractionComplete }) {
       const queued = await extractActionsAsync(uploadResult.pdf_url);
       if (signal.aborted) return;
 
-      // Step 3: poll for completion
-      const extractResult = await _pollUntilDone(queued.job_id, signal, setProgress);
+      // Step 3: poll for completion — passes pdfUrl for DB fallback on restart
+      const extractResult = await _pollUntilDone(
+        queued.job_id, uploadResult.pdf_url, signal, setProgress
+      );
       if (signal.aborted) return;
 
       setStatus('done');
@@ -255,9 +258,16 @@ export default function UploadCard({ onExtractionComplete }) {
 
 // ── Polling helper ────────────────────────────────────────────
 
-async function _pollUntilDone(jobId, signal, setProgress) {
+/**
+ * Two-tier polling:
+ *  1. Poll /extract-actions-status/{jobId}  (in-memory, fast)
+ *  2. On 410 Gone (backend restarted), switch to
+ *     polling /case-processing-status?pdf_url=... (DB-backed, restart-safe)
+ */
+async function _pollUntilDone(jobId, pdfUrl, signal, setProgress) {
   let poll = 0;
   let consecutiveErrors = 0;
+  let useDbFallback = false;  // flip to true on 410
   const start = Date.now();
 
   while (poll < MAX_POLLS) {
@@ -271,22 +281,35 @@ async function _pollUntilDone(jobId, signal, setProgress) {
 
     let st;
     try {
-      st = await getExtractActionsStatus(jobId);
+      if (useDbFallback) {
+        // DB-backed poll — survives backend restarts
+        st = await getCaseProcessingStatus(pdfUrl);
+        // Normalise to same shape as job-store response
+        if (!st.stage) st.stage = st.status;
+      } else {
+        st = await getExtractActionsStatus(jobId);
+      }
       consecutiveErrors = 0;
     } catch (pollErr) {
-      consecutiveErrors++;
+      // ── 410 Gone: backend restarted, flip to DB fallback ──────
+      if (pollErr?.status === 410 && pdfUrl && !useDbFallback) {
+        useDbFallback = true;
+        setProgress(`Backend restarted — resuming status from database… (${elapsedSec}s)`);
+        consecutiveErrors = 0;
+        continue;  // retry immediately on DB path
+      }
 
-      // 410 Gone = backend restarted; in-memory job store was wiped
+      // ── Propagate 410 if we already switched and DB also fails ─
       if (pollErr?.status === 410) {
         const detail = pollErr?.payload?.detail || {};
         throw new Error(
           typeof detail === 'string'
             ? detail
-            : (detail.error || 'Backend restarted during extraction. Check the case list — your document may still have been processed.')
+            : (detail.error || 'Backend restarted during extraction. Check the case list.')
         );
       }
 
-      // Other network errors — allow a few retries before giving up
+      consecutiveErrors++;
       if (consecutiveErrors >= MAX_POLL_ERRORS) {
         throw new Error(
           `Lost connection to server after ${elapsedSec}s. ` +
@@ -294,20 +317,20 @@ async function _pollUntilDone(jobId, signal, setProgress) {
         );
       }
 
-      // Transient error — update UI and retry next cycle
       setProgress(`Retrying status check… (${elapsedSec}s)`);
       continue;
     }
 
     // Update progress label using stage from server
-    setProgress(stageLabel(st.stage || st.status, elapsedSec));
+    const source = useDbFallback ? ' [DB]' : '';
+    setProgress(stageLabel(st.stage || st.status, elapsedSec) + source);
 
     if (st.status === 'completed') {
-      return st.result;
+      return st.result || st;  // DB path returns the row itself, not .result
     }
 
     if (st.status === 'failed') {
-      const stage  = st.error_stage ? ` [stage: ${st.error_stage}]` : '';
+      const stage  = st.error_stage ? ` [stage: ${st.error_stage}]` : st.stage ? ` [stage: ${st.stage}]` : '';
       const reason = st.error || 'Extraction job failed';
       throw new Error(`${reason}${stage}`);
     }

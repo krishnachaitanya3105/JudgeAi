@@ -111,6 +111,15 @@ export async function getExtractActionsStatus(jobId) {
   return request(`/extract-actions-status/${encodeURIComponent(jobId)}`);
 }
 
+/**
+ * DB-backed status check by PDF URL — survives backend restarts.
+ * Falls back to this when getExtractActionsStatus returns 410.
+ */
+export async function getCaseProcessingStatus(pdfUrl) {
+  const params = new URLSearchParams({ pdf_url: pdfUrl });
+  return request(`/case-processing-status?${params.toString()}`);
+}
+
 export async function getBatchStatus(jobId) {
   return request(`/batch-status/${encodeURIComponent(jobId)}`);
 }

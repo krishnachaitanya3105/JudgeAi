@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertCircle,
@@ -54,8 +54,18 @@ export default function AdminDashboard() {
   const [showCreateOfficer, setShowCreateOfficer] = useState(false);
   const [officerForm, setOfficerForm] = useState({ email: '', password: '', full_name: '' });
   const [creatingOfficer, setCreatingOfficer] = useState(false);
+  // mounted guard: charts only render once the DOM has real pixel dimensions
+  const [mounted, setMounted] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const refresh = useCallback(() => {
+    setError('');
+    setLoading(true);
+    setRefreshKey((k) => k + 1);
+  }, []);
 
   useEffect(() => {
+    setMounted(false);
     const fetchData = async () => {
       try {
         const data = await getAdminDashboard();
@@ -66,10 +76,12 @@ export default function AdminDashboard() {
         toast.error(message);
       } finally {
         setLoading(false);
+        // Defer chart mount until after the paint cycle so DOM has real dimensions
+        requestAnimationFrame(() => setMounted(true));
       }
     };
     fetchData();
-  }, []);
+  }, [refreshKey]);
 
   const handleCreateOfficer = async (e) => {
     e.preventDefault();
@@ -268,6 +280,9 @@ export default function AdminDashboard() {
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-ghost" onClick={refresh} title="Refresh dashboard">
+            ↺ Refresh
+          </button>
           <button className="btn btn-ghost" onClick={downloadCSV}>
             <Download size={16} />
             Export CSV
@@ -651,6 +666,7 @@ export default function AdminDashboard() {
             <h3 className="text-card-title">Status Distribution</h3>
           </div>
           <div style={{ height: 280 }}>
+            {mounted && (
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
@@ -675,6 +691,7 @@ export default function AdminDashboard() {
                 <ChartTooltip />
               </PieChart>
             </ResponsiveContainer>
+            )}
           </div>
         </div>
 
@@ -685,6 +702,7 @@ export default function AdminDashboard() {
             <h3 className="text-card-title">Verification Stats</h3>
           </div>
           <div style={{ height: 280 }}>
+            {mounted && (
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
                 data={Object.entries(dashboard?.verification_counts || {}).map(([name, value]) => ({
@@ -699,6 +717,7 @@ export default function AdminDashboard() {
                 <Bar dataKey="value" fill={CHART_COLORS.primary} radius={[6, 6, 0, 0]} maxBarSize={50} />
               </BarChart>
             </ResponsiveContainer>
+            )}
           </div>
         </div>
       </div>
@@ -712,6 +731,7 @@ export default function AdminDashboard() {
             <h3 className="text-card-title">Cases per Department</h3>
           </div>
           <div style={{ height: 280 }}>
+            {mounted && (
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={dashboard?.cases_processed_per_department || []} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" horizontal={false} />
@@ -732,6 +752,7 @@ export default function AdminDashboard() {
                 <Bar dataKey="pending" fill={CHART_COLORS.warning} name="Pending" radius={[0, 4, 4, 0]} maxBarSize={20} />
               </BarChart>
             </ResponsiveContainer>
+            )}
           </div>
         </div>
 
@@ -742,6 +763,7 @@ export default function AdminDashboard() {
             <h3 className="text-card-title">Verification Accuracy Trend</h3>
           </div>
           <div style={{ height: 280 }}>
+            {mounted && (
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={dashboard?.verification_accuracy_trend || []}>
                 <defs>
@@ -768,6 +790,7 @@ export default function AdminDashboard() {
                 <Area type="monotone" dataKey="rejected" stroke={CHART_COLORS.danger} fill="url(#gradRejected)" strokeWidth={2} name="Rejected" />
               </AreaChart>
             </ResponsiveContainer>
+            )}
           </div>
         </div>
       </div>

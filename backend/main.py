@@ -7,32 +7,45 @@ with Supabase storage and structured data extraction.
 
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
-# ── Structured logging ───────────────────────────
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
+
+# ── Structured logging ────────────────────────────────────────
 _log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, _log_level, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)    # reduce noise
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 _logger = logging.getLogger("judgeai.main")
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.gzip import GZipMiddleware
+from backend.routers import (
+    batch_upload,
+    dashboard,
+    demo_router,
+    extract,
+    search_router,
+    upload,
+    verification,
+)
 
-from backend.routers import upload, extract, verification, dashboard, batch_upload, demo_router, search_router
+APP_VERSION = "2.1.0"
+_START_TIME = time.time()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from backend.services.notification_scheduler import shutdown_scheduler, start_scheduler
 
-    _logger.info("JudgeAI starting up…")
+    _logger.info("JudgeAI v%s starting up (log_level=%s)…", APP_VERSION, _log_level)
     start_scheduler()
     try:
         yield
@@ -41,21 +54,36 @@ async def lifespan(app: FastAPI):
         shutdown_scheduler()
 
 
-# ── Application Instance ─────────────────────────
+# ── Application Instance ──────────────────────────────────────
 app = FastAPI(
     title="JudgeAI",
     description="AI-powered legal governance assistant for court judgment analysis",
-    version="2.0.0",
+    version=APP_VERSION,
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
 )
 
-# ── CORS (dev + configurable prod) ─
-#
-# Env:
-# - CORS_ALLOW_ORIGINS="https://your-frontend.vercel.app,https://yourdomain.com"
-# - CORS_ALLOW_ORIGIN_REGEX="https://.*\\.vercel\\.app"
+
+# ── Global exception handler — always returns JSON ────────────
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    _logger.error(
+        "Unhandled exception on %s %s: %s",
+        request.method, request.url.path, exc,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "detail": str(exc),
+            "path": request.url.path,
+        },
+    )
+
+
+# ── CORS ───────────────────────────────────────────────────────
 cors_allow_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -81,21 +109,39 @@ app.add_middleware(
 )
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
-# ── Register Routers ────────────────────────────
-app.include_router(upload.router, prefix="/api", tags=["Upload"])
-app.include_router(batch_upload.router, prefix="/api", tags=["Upload"])
-app.include_router(extract.router, prefix="/api", tags=["Extraction"])
-app.include_router(demo_router.router, prefix="/api", tags=["Demo"])
-app.include_router(verification.router, prefix="/api", tags=["Verification"])
-app.include_router(dashboard.router, prefix="/api", tags=["Dashboards"])
-app.include_router(search_router.router, prefix="/api", tags=["Search"])
+
+# ── Routers ────────────────────────────────────────────────────
+app.include_router(upload.router,         prefix="/api", tags=["Upload"])
+app.include_router(batch_upload.router,   prefix="/api", tags=["Upload"])
+app.include_router(extract.router,        prefix="/api", tags=["Extraction"])
+app.include_router(demo_router.router,    prefix="/api", tags=["Demo"])
+app.include_router(verification.router,   prefix="/api", tags=["Verification"])
+app.include_router(dashboard.router,      prefix="/api", tags=["Dashboards"])
+app.include_router(search_router.router,  prefix="/api", tags=["Search"])
 
 
-# ── Health Check ─────────────────────────────────
+# ── Health check (with DB ping) ───────────────────────────────
 @app.get("/", tags=["Health"])
 async def health_check():
+    uptime_sec = round(time.time() - _START_TIME, 1)
+    db_ok = False
+    try:
+        from backend.config import get_supabase
+        get_supabase().table("cases").select("id").limit(1).execute()
+        db_ok = True
+    except Exception as e:
+        _logger.warning("Health check DB ping failed: %s", e)
+
     return {
-        "status": "operational",
+        "status": "operational" if db_ok else "degraded",
         "service": "JudgeAI API",
-        "version": "2.0.0",
+        "version": APP_VERSION,
+        "uptime_sec": uptime_sec,
+        "db": "ok" if db_ok else "unreachable",
     }
+
+
+@app.get("/health", tags=["Health"])
+async def health_detail():
+    """Render health check endpoint — returns 200 unless DB is completely down."""
+    return await health_check()

@@ -30,16 +30,24 @@ def _within_days(deadline_str: str, max_days: int = 3) -> bool:
 
 def scan_deadlines_and_notify() -> int:
     """
-    Find extracted_actions whose deadline is within 3 calendar days ahead
-    (not overdue) and enqueue a notifications row.
+    Find extracted_actions whose deadline is within the next 3 calendar days
+    and enqueue a notifications row.
 
-    notifications.user_id is NULL unless you map officers to alerts separately.
+    Uses server-side date filters to avoid a full table scan as the dataset grows.
+    notifications.user_id is NULL unless officers are mapped to alerts separately.
     """
     supabase = get_supabase()
+    now = datetime.now(timezone.utc)
+    today_iso = now.date().isoformat()
+    cutoff_iso = (now + timedelta(days=3)).date().isoformat()
+
     try:
+        # Filter server-side: only rows with deadline in [today, today+3]
         resp = (
             supabase.table("extracted_actions")
             .select("id, case_number, deadline, department")
+            .gte("deadline", today_iso)
+            .lte("deadline", cutoff_iso)
             .execute()
         )
     except Exception as e:
@@ -47,15 +55,15 @@ def scan_deadlines_and_notify() -> int:
         return 0
 
     rows = resp.data or []
+    logger.info("Deadline scan: %d upcoming deadline(s) found in [%s, %s]", len(rows), today_iso, cutoff_iso)
+
     inserted = 0
-    seen = set()
+    seen: set = set()
     for row in rows:
         did = row.get("deadline")
         if not did:
             continue
         dl = did[:10] if isinstance(did, str) else str(did)
-        if not _within_days(dl):
-            continue
         key = f"{row.get('case_number')}:{dl}"
         if key in seen:
             continue
@@ -72,12 +80,13 @@ def scan_deadlines_and_notify() -> int:
                     "notification_type": "deadline_imminent",
                     "message": msg,
                     "is_read": False,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_at": now.isoformat(),
                 }
             ).execute()
             inserted += 1
         except Exception as err:
             logger.debug("notification insert skipped: %s", err)
+
     logger.info("Deadline scan queued %s notification(s)", inserted)
     return inserted
 
