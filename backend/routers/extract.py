@@ -7,6 +7,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict
+import threading
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
@@ -16,6 +17,15 @@ from backend.services.pipeline import persist_extraction_record, run_pdf_and_llm
 
 router = APIRouter()
 EXTRACTION_JOB_STORE: Dict[str, Dict[str, Any]] = {}
+extraction_lock = threading.Lock()
+
+def _cleanup_job_store():
+    """Prevent memory leak by keeping only the most recent 50 jobs."""
+    if len(EXTRACTION_JOB_STORE) > 50:
+        # Dictionary maintains insertion order in Python 3.7+
+        keys_to_delete = list(EXTRACTION_JOB_STORE.keys())[:-50]
+        for k in keys_to_delete:
+            del EXTRACTION_JOB_STORE[k]
 
 
 class ExtractRequest(BaseModel):
@@ -26,13 +36,14 @@ def _run_single_extraction_job(job_id: str, pdf_url: str) -> None:
     EXTRACTION_JOB_STORE[job_id]["status"] = "processing"
     EXTRACTION_JOB_STORE[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        extracted_data, extracted_text, layout_blocks = run_pdf_and_llm(pdf_url)
-        out = persist_extraction_record(
-            pdf_url,
-            extracted_data,
-            extracted_text,
-            layout_blocks,
-        )
+        with extraction_lock:
+            extracted_data, extracted_text, layout_blocks = run_pdf_and_llm(pdf_url)
+            out = persist_extraction_record(
+                pdf_url,
+                extracted_data,
+                extracted_text,
+                layout_blocks,
+            )
         db_row = (out.get("db_record") or [{}])[0]
         EXTRACTION_JOB_STORE[job_id]["status"] = "completed"
         EXTRACTION_JOB_STORE[job_id]["result"] = out
@@ -88,6 +99,7 @@ async def extract_actions_async(payload: ExtractRequest, background_tasks: Backg
         pass
 
     background_tasks.add_task(_run_single_extraction_job, job_id, payload.pdf_url)
+    _cleanup_job_store()
     return {
         "job_id": job_id,
         "status": "queued",

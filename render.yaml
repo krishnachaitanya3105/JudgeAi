@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: judgeai-backend
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT --workers 1 --limit-concurrency 50"
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: JUDGEAI_MAX_PARSE_PAGES
+        value: 12
+      - key: JUDGEAI_OCR_DPI
+        value: 100

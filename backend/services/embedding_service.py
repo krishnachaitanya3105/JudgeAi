@@ -17,14 +17,25 @@ def generate_embedding(text: str) -> List[float]:
     if not t:
         return [0.0] * 384
     encoder = get_minilm_encoder()
-    vec = encoder.encode(t[:24000], convert_to_numpy=True)
+    # MiniLM only uses the first ~512 tokens anyway (approx 2000-3000 chars)
+    # Truncating early saves significant RAM and tokenizer overhead
+    vec = encoder.encode(t[:3000], convert_to_numpy=True)
     import numpy as np
+    import gc
 
     v = vec.astype(np.float64)
     n = np.linalg.norm(v)
     if n > 0:
         v = v / n
-    return v.tolist()
+        
+    result = v.tolist()
+    
+    # Cleanup memory
+    del vec
+    del v
+    gc.collect()
+    
+    return result
 
 
 def embedding_dimensions() -> int:
