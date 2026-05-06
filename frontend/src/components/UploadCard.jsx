@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Upload, FileCheck, Loader2, AlertCircle, Layers } from 'lucide-react';
 import {
@@ -15,6 +15,15 @@ export default function UploadCard({ onExtractionComplete }) {
   const [error, setError] = useState('');
   const [progress, setProgress] = useState('');
   const [progressPercent, setProgressPercent] = useState(0);
+  
+  const abortController = useRef(null);
+
+  useEffect(() => {
+    abortController.current = new AbortController();
+    return () => {
+      abortController.current.abort();
+    };
+  }, []);
 
   const onDrop = useCallback(async (acceptedFiles) => {
     const list = [...acceptedFiles].filter(Boolean);
@@ -73,8 +82,10 @@ export default function UploadCard({ onExtractionComplete }) {
       const maxPolls = 180; // ~6 min at 2s interval
       let poll = 0;
       let extractResult = null;
-      while (poll < maxPolls) {
+      while (poll < maxPolls && !abortController.current?.signal.aborted) {
         await new Promise((resolve) => setTimeout(resolve, 2000));
+        if (abortController.current?.signal.aborted) return;
+        
         poll += 1;
         const st = await getExtractActionsStatus(queued.job_id);
         if (st.status === 'completed') {
@@ -87,6 +98,8 @@ export default function UploadCard({ onExtractionComplete }) {
         setProgress(`AI analyzing judgment... (${poll * 2}s)`);
       }
 
+      if (abortController.current?.signal.aborted) return;
+
       if (!extractResult) {
         throw new Error('Extraction is taking longer than expected. Please check case list shortly.');
       }
@@ -96,6 +109,7 @@ export default function UploadCard({ onExtractionComplete }) {
       toast.success('PDF uploaded and extracted successfully', { id: 'upload' });
       onExtractionComplete?.(extractResult);
     } catch (err) {
+      if (abortController.current?.signal.aborted) return;
       setStatus('error');
       const message = err?.response?.data?.detail || err.message || 'Something went wrong';
       setError(message);
