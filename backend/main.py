@@ -5,8 +5,21 @@ Legal governance assistant powered by Groq LLaMA3
 with Supabase storage and structured data extraction.
 """
 
-from contextlib import asynccontextmanager
+import logging
 import os
+from contextlib import asynccontextmanager
+
+# ── Structured logging ───────────────────────────
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)    # reduce noise
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+_logger = logging.getLogger("judgeai.main")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,10 +32,12 @@ from backend.routers import upload, extract, verification, dashboard, batch_uplo
 async def lifespan(app: FastAPI):
     from backend.services.notification_scheduler import shutdown_scheduler, start_scheduler
 
+    _logger.info("JudgeAI starting up…")
     start_scheduler()
     try:
         yield
     finally:
+        _logger.info("JudgeAI shutting down…")
         shutdown_scheduler()
 
 

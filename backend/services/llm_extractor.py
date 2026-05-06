@@ -2,38 +2,38 @@
 LLM Extractor Service — Groq LLaMA3.3-70B
 ──────────────────────────────────────────────────
 Sends court judgment text to Groq's LLaMA model
-and parses the structured JSON response containing:
-  - case_number
-  - judgment_date
-  - department
-  - deadline
-  - directive
-  - confidence_score
-  - source_sentence
+and parses the structured JSON response.
 
-✅ FIXED: Updated model from deprecated llama-3.1-8b-instant to llama-3.3-70b-versatile
-   The error "400 Bad Request" with the old model was because many Groq models have been
-   decommissioned. The llama-3.3-70b-versatile is the current active model.
+Changes vs previous version:
+  - max_chars default reduced to 12 000 (was 24 000) — halves request payload
+    and significantly reduces Groq processing time on the free tier.
+  - Accepts optional request_id for correlated logging.
+  - Detailed per-attempt logging: attempt#, status code, elapsed.
+  - 400 errors from Groq are now surfaced with the full body, not swallowed.
 """
 
 import json
+import logging
 import os
 import re
 import time
+
 import httpx
 
 from backend.config import GROQ_API_KEY
 
+logger = logging.getLogger("judgeai.llm_extractor")
+
 # ── Groq API Configuration ──────────────────────
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"  # Default; override via env when needed
+GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_MODEL_ENV = "JUDGEAI_GROQ_MODEL"
 GROQ_MAX_CHARS_ENV = "JUDGEAI_LLM_MAX_CHARS"
 GROQ_MAX_TOKENS_ENV = "JUDGEAI_LLM_MAX_TOKENS"
 GROQ_RETRIES_ENV = "JUDGEAI_LLM_RETRIES"
 GROQ_TIMEOUT_ENV = "JUDGEAI_LLM_TIMEOUT_SEC"
 
-# ── System Prompt ────────────────────────────────
+# ── System Prompt ─────────────────────────────────
 SYSTEM_PROMPT = """You are a legal governance assistant.
 
 Your task is to carefully analyze the provided court judgment text and extract the following fields:
@@ -67,9 +67,8 @@ Example output:
 def _parse_json_response(raw_text: str) -> dict:
     """
     Robustly parse JSON from LLM output.
-    Handles cases where the model wraps JSON in markdown code blocks.
+    Handles markdown code fences and partial JSON.
     """
-    # Strip markdown code fences if present
     cleaned = raw_text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -78,31 +77,31 @@ def _parse_json_response(raw_text: str) -> dict:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        # Attempt to find JSON object in the text
         match = re.search(r"\{[\s\S]*\}", cleaned)
         if match:
             return json.loads(match.group())
         raise ValueError(f"Could not parse JSON from LLM response: {raw_text[:200]}")
 
 
-def extract_judgment_actions(judgment_text: str) -> dict:
+def extract_judgment_actions(
+    judgment_text: str,
+    request_id: str = "n/a",
+) -> dict:
     """
-    Send court judgment text to Groq LLaMA3-8B and return
-    structured extraction as a Python dict.
+    Send court judgment text to Groq and return structured extraction dict.
 
     Args:
         judgment_text: Raw text extracted from a court judgment PDF.
+        request_id:    Correlation ID for log tracing.
 
     Returns:
         Dict with keys: case_number, judgment_date, department,
         deadline, directive, confidence_score, source_sentence.
 
     Raises:
-        ValueError: If the LLM response cannot be parsed as JSON.
-        httpx.HTTPStatusError: If the Groq API returns an error.
+        ValueError: If the LLM response cannot be parsed or the API errors.
     """
-    # Truncate very long texts to stay within context window
-    max_chars = int(os.getenv(GROQ_MAX_CHARS_ENV, "24000"))
+    max_chars = int(os.getenv(GROQ_MAX_CHARS_ENV, "12000"))   # reduced default
     if len(judgment_text) > max_chars:
         judgment_text = judgment_text[:max_chars] + "\n\n[...truncated...]"
 
@@ -132,35 +131,67 @@ def extract_judgment_actions(judgment_text: str) -> dict:
         "Content-Type": "application/json",
     }
 
+    logger.info(
+        "[llm_extractor] req=%s model=%s chars=%d timeout=%.0fs",
+        request_id, model, len(judgment_text), timeout_sec,
+    )
+
     last_err = None
+    response = None
     with httpx.Client(timeout=timeout_sec) as client:
         for attempt in range(retries + 1):
+            t0 = time.monotonic()
             try:
                 response = client.post(GROQ_API_URL, json=payload, headers=headers)
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "[llm_extractor] req=%s attempt=%d status=%d elapsed=%.2fs",
+                    request_id, attempt + 1, response.status_code, elapsed,
+                )
                 response.raise_for_status()
                 break
             except httpx.HTTPStatusError as e:
+                elapsed = time.monotonic() - t0
                 last_err = e
                 code = e.response.status_code
-                # Retry on rate-limit / transient backend failures.
-                if attempt < retries and code in {408, 409, 425, 429, 500, 502, 503, 504}:
-                    time.sleep(0.6 * (2**attempt))
+                body = e.response.text[:300]
+                logger.warning(
+                    "[llm_extractor] req=%s attempt=%d HTTP %d in %.2fs body=%s",
+                    request_id, attempt + 1, code, elapsed, body,
+                )
+                # Retry on transient errors; 400 is a bad-request (model/payload issue) — no retry
+                retryable = {408, 409, 425, 429, 500, 502, 503, 504}
+                if attempt < retries and code in retryable:
+                    wait = 0.6 * (2 ** attempt)
+                    logger.info("[llm_extractor] req=%s retrying in %.1fs…", request_id, wait)
+                    time.sleep(wait)
                     continue
-                error_body = e.response.text
-                raise ValueError(f"Groq API error {code}: {error_body}")
+                raise ValueError(
+                    f"Groq API error {code}: {body}"
+                ) from e
             except (httpx.TimeoutException, httpx.TransportError) as e:
+                elapsed = time.monotonic() - t0
                 last_err = e
+                logger.warning(
+                    "[llm_extractor] req=%s attempt=%d network error in %.2fs: %s",
+                    request_id, attempt + 1, elapsed, str(e)[:120],
+                )
                 if attempt < retries:
-                    time.sleep(0.6 * (2**attempt))
+                    wait = 0.6 * (2 ** attempt)
+                    time.sleep(wait)
                     continue
-                raise ValueError(f"Groq API request failed: {str(e)}")
+                raise ValueError(f"Groq API request failed (network): {e}") from e
         else:
-            raise ValueError(f"Groq API request failed: {str(last_err)}")
+            raise ValueError(f"Groq API request failed after {retries + 1} attempts: {last_err}")
 
     data = response.json()
     raw_content = data["choices"][0]["message"]["content"]
-
     parsed = _parse_json_response(raw_content)
     parsed.setdefault("source_sentence", None)
     parsed.setdefault("confidence_score", 0.0)
+
+    logger.info(
+        "[llm_extractor] req=%s parsed OK case=%s conf=%s",
+        request_id, parsed.get("case_number"), parsed.get("confidence_score"),
+    )
     return parsed

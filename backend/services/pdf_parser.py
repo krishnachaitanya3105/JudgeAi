@@ -4,24 +4,48 @@ PDF Parser Service
 Extracts text from PDF files using PyMuPDF as the
 primary engine, with EasyOCR as a fallback for
 scanned / image-heavy documents.
+
+Memory optimizations (Render 512 MB free plan):
+ - PDF is streamed from URL; never fully loaded into RAM as bytes.
+ - OCR is capped at MAX_OCR_PAGES (independent of MAX_PARSE_PAGES).
+ - Per-page gc.collect() + pixmap delete prevents accumulation.
+ - Structured log lines include RSS memory at each stage.
 """
 
-import os
-import tempfile
-import fitz  # PyMuPDF
-import requests
-import easyocr
-import numpy as np
-
-# ── Configuration ────────────────────────────────
-TEXT_LENGTH_THRESHOLD = 100  # chars; below this → fallback to OCR
-MAX_PARSE_PAGES = int(os.getenv("JUDGEAI_MAX_PARSE_PAGES", "24"))
-OCR_DPI = int(os.getenv("JUDGEAI_OCR_DPI", "100"))  # Reduced to 100 to save RAM on Render
-REQUEST_TIMEOUT_SEC = float(os.getenv("JUDGEAI_PDF_REQUEST_TIMEOUT_SEC", "30"))
+from __future__ import annotations
 
 import gc
+import logging
+import os
+import tempfile
+import time
+from typing import Tuple
 
-# Lazy-loaded EasyOCR reader (heavy initialization)
+import fitz  # PyMuPDF
+import numpy as np
+import requests
+
+logger = logging.getLogger("judgeai.pdf_parser")
+
+# ── Configuration ─────────────────────────────────────────────
+TEXT_LENGTH_THRESHOLD = 100  # chars; below this → fallback to OCR
+MAX_PARSE_PAGES = int(os.getenv("JUDGEAI_MAX_PARSE_PAGES", "12"))
+MAX_OCR_PAGES = int(os.getenv("JUDGEAI_MAX_OCR_PAGES", "6"))   # hard cap for OCR path
+OCR_DPI = int(os.getenv("JUDGEAI_OCR_DPI", "72"))              # 72 DPI is enough for text OCR
+REQUEST_TIMEOUT_SEC = float(os.getenv("JUDGEAI_PDF_REQUEST_TIMEOUT_SEC", "45"))
+STREAM_CHUNK_BYTES = 65_536  # 64 KB chunks when downloading
+
+
+def _rss_mb() -> float:
+    """Return current process RSS in MB (best-effort; 0.0 if psutil unavailable)."""
+    try:
+        import psutil, os as _os
+        return psutil.Process(_os.getpid()).memory_info().rss / 1_048_576
+    except Exception:
+        return 0.0
+
+
+# ── Lazy-loaded EasyOCR reader (heavy initialisation ~250 MB) ─
 _ocr_reader = None
 
 
@@ -29,89 +53,79 @@ def _get_ocr_reader():
     """Lazy-load the EasyOCR reader to avoid startup overhead."""
     global _ocr_reader
     if _ocr_reader is None:
+        logger.info("[pdf_parser] Initialising EasyOCR reader (rss=%.1f MB)", _rss_mb())
+        t0 = time.monotonic()
+        import easyocr
         _ocr_reader = easyocr.Reader(["en"], gpu=False)
+        logger.info(
+            "[pdf_parser] EasyOCR ready in %.2fs (rss=%.1f MB)",
+            time.monotonic() - t0, _rss_mb(),
+        )
     return _ocr_reader
 
 
-def extract_text_pymupdf(pdf_path: str) -> str:
+# ── Internal helpers ───────────────────────────────────────────
+
+def _stream_pdf_to_tempfile(pdf_url: str) -> str:
     """
-    Extract text from a PDF using PyMuPDF (fitz).
-    Iterates through every page and concatenates the text.
+    Stream-download a PDF URL into a named temp file.
+    Returns the temp file path. Caller must os.unlink() it.
+
+    Streaming avoids loading the full PDF binary into RAM
+    (critical for Render's 512 MB limit).
     """
-    text_parts = []
-    doc = fitz.open(pdf_path)
-    page_count = len(doc)
-    end = min(page_count, MAX_PARSE_PAGES if MAX_PARSE_PAGES > 0 else page_count)
-    for i in range(end):
-        page = doc.load_page(i)
-        text_parts.append(page.get_text())
-    doc.close()
-    return "\n".join(text_parts).strip()
+    logger.info(
+        "[pdf_parser] Streaming PDF from %s… (rss=%.1f MB)", pdf_url[:80], _rss_mb()
+    )
+    t0 = time.monotonic()
+    response = requests.get(pdf_url, timeout=REQUEST_TIMEOUT_SEC, stream=True)
+    response.raise_for_status()
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    total_bytes = 0
+    try:
+        for chunk in response.iter_content(chunk_size=STREAM_CHUNK_BYTES):
+            if chunk:
+                tmp.write(chunk)
+                total_bytes += len(chunk)
+        tmp.flush()
+    finally:
+        tmp.close()
+        response.close()
+
+    logger.info(
+        "[pdf_parser] Downloaded %.1f KB in %.2fs (rss=%.1f MB)",
+        total_bytes / 1024, time.monotonic() - t0, _rss_mb(),
+    )
+    return tmp.name
 
 
-def extract_text_easyocr(pdf_path: str) -> str:
+def _extract_pymupdf_text_and_blocks(pdf_path: str) -> Tuple[str, list]:
     """
-    Fallback: render each page as an image and run EasyOCR.
-    Used when PyMuPDF returns insufficient text (scanned docs).
-    Memory-optimized: sequential processing + aggressive GC.
+    Single-pass PyMuPDF extraction: returns (full_text, layout_blocks).
+    Opens the document exactly once.
     """
-    reader = _get_ocr_reader()
-    doc = fitz.open(pdf_path)
-    page_count = len(doc)
-    end = min(page_count, MAX_PARSE_PAGES if MAX_PARSE_PAGES > 0 else page_count)
+    text_parts: list[str] = []
+    blocks_out: list[dict] = []
 
-    text_parts = []
-    for page_num in range(end):
-        page = doc.load_page(page_num)
-        pix = page.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csRGB)
-        n = pix.n
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, n)
-        
-        results = reader.readtext(img, detail=0)
-        if results:
-            text_parts.extend(results)
-            
-        # Aggressive memory cleanup per page
-        del img
-        del pix
-        del page
-        gc.collect()
-
-    doc.close()
-    gc.collect()
-    return "\n".join(text_parts).strip()
-
-
-def extract_text_from_path(pdf_path: str) -> str:
-    """
-    Main extraction function.
-    1. Try PyMuPDF first
-    2. If text is below threshold → fallback to EasyOCR
-    3. Return clean extracted text
-    """
-    # Primary: PyMuPDF
-    text = extract_text_pymupdf(pdf_path)
-
-    # Fallback: EasyOCR for scanned documents
-    if len(text) < TEXT_LENGTH_THRESHOLD:
-        text = extract_text_easyocr(pdf_path)
-
-    return text
-
-
-def extract_structured_blocks(pdf_path: str) -> list:
-    """
-    Layout-aware text blocks with bounding boxes (PyMuPDF PDF user space).
-
-    Each item: {"text", "page_number", "bbox": [x0,y0,x1,y1]}
-    """
-    blocks_out = []
     doc = fitz.open(pdf_path)
     try:
         page_count = len(doc)
         end = min(page_count, MAX_PARSE_PAGES if MAX_PARSE_PAGES > 0 else page_count)
+        logger.info(
+            "[pdf_parser] PyMuPDF: %d total pages, processing %d (rss=%.1f MB)",
+            page_count, end, _rss_mb(),
+        )
+
         for page_ix in range(end):
             page = doc.load_page(page_ix)
+
+            # Plain text
+            t = page.get_text()
+            if t:
+                text_parts.append(t)
+
+            # Layout blocks (dict mode)
             page_dict = page.get_text("dict")
             for blk in page_dict.get("blocks", []):
                 if blk.get("type") != 0:
@@ -136,116 +150,122 @@ def extract_structured_blocks(pdf_path: str) -> list:
                 )
     finally:
         doc.close()
-    return blocks_out
+
+    return "\n".join(text_parts).strip(), blocks_out
 
 
-def extract_pdf_bundle_from_path(pdf_path: str) -> tuple:
+def _extract_ocr_text(pdf_path: str) -> str:
     """
-    Extract (text, layout_blocks) in a single pass over the PDF.
-
-    - Uses PyMuPDF text for speed.
-    - Falls back to EasyOCR (in-memory) if extracted text is insufficient (scanned PDFs).
+    EasyOCR fallback: render pages as images and OCR them.
+    Capped at MAX_OCR_PAGES and cleans up pixmap memory per page.
     """
-    blocks_out = []
-    text_parts = []
-
+    reader = _get_ocr_reader()
     doc = fitz.open(pdf_path)
+    ocr_parts: list[str] = []
+
     try:
         page_count = len(doc)
-        end = min(page_count, MAX_PARSE_PAGES if MAX_PARSE_PAGES > 0 else page_count)
+        end = min(page_count, MAX_OCR_PAGES if MAX_OCR_PAGES > 0 else page_count)
+        logger.info(
+            "[pdf_parser] EasyOCR fallback: %d total pages, OCR-ing %d at %d DPI (rss=%.1f MB)",
+            page_count, end, OCR_DPI, _rss_mb(),
+        )
 
-        for page_ix in range(end):
-            page = doc.load_page(page_ix)
+        for page_num in range(end):
+            page = doc.load_page(page_num)
+            pix = page.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csGRAY)  # grayscale → half RAM vs RGB
+            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
 
-            # Fast text
-            t = page.get_text()
-            if t:
-                text_parts.append(t)
+            results = reader.readtext(img, detail=0)
+            if results:
+                ocr_parts.extend(results)
 
-            # Layout blocks
-            page_dict = page.get_text("dict")
-            for blk in page_dict.get("blocks", []):
-                if blk.get("type") != 0:
-                    continue
-                parts = []
-                for line in blk.get("lines", []):
-                    parts.append("".join(span.get("text", "") for span in line.get("spans", [])))
-                text = " ".join(s for s in parts if s).strip()
-                if not text:
-                    continue
-                bb = blk.get("bbox")
-                if not bb:
-                    continue
-                blocks_out.append(
-                    {
-                        "page_number": page_ix + 1,
-                        "text": text,
-                        "bbox": [float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3])],
-                    }
-                )
+            # Aggressive per-page cleanup
+            del img
+            del pix
+            del page
+            gc.collect()
 
-        text = "\n".join(text_parts).strip()
-
-        # OCR fallback (scanned/image-heavy docs)
-        if len(text) < TEXT_LENGTH_THRESHOLD:
-            reader = _get_ocr_reader()
-            ocr_parts = []
-            
-            for page_ix in range(end):
-                p = doc.load_page(page_ix)
-                pix = p.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csRGB)
-                n = pix.n
-                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, n)
-                
-                results = reader.readtext(img, detail=0)
-                if results:
-                    ocr_parts.extend(results)
-                    
-                # Aggressive memory cleanup
-                del img
-                del pix
-                del p
-                gc.collect()
-                
-            text = "\n".join(ocr_parts).strip()
-
-        return text, blocks_out
+            logger.debug(
+                "[pdf_parser] OCR page %d/%d done (rss=%.1f MB)", page_num + 1, end, _rss_mb()
+            )
     finally:
         doc.close()
         gc.collect()
 
+    return "\n".join(ocr_parts).strip()
 
-def extract_pdf_bundle_from_url(pdf_url: str) -> tuple:
-    """Download PDF once; return (full_text, layout_blocks)."""
-    response = requests.get(pdf_url, timeout=REQUEST_TIMEOUT_SEC)
-    response.raise_for_status()
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp.write(response.content)
-    tmp.close()
-    path = tmp.name
+
+# ── Public API ─────────────────────────────────────────────────
+
+def extract_pdf_bundle_from_url(pdf_url: str) -> Tuple[str, list]:
+    """
+    Download PDF (streamed) → (full_text, layout_blocks).
+
+    Pipeline:
+      1. Stream-download to temp file.
+      2. Single-pass PyMuPDF text + block extraction.
+      3. If text < threshold, EasyOCR fallback.
+      4. Temp file deleted in finally block.
+    """
+    path = _stream_pdf_to_tempfile(pdf_url)
     try:
-        text, blocks = extract_pdf_bundle_from_path(path)
+        t0 = time.monotonic()
+        text, blocks = _extract_pymupdf_text_and_blocks(path)
+        logger.info(
+            "[pdf_parser] PyMuPDF extracted %d chars, %d blocks in %.2fs (rss=%.1f MB)",
+            len(text), len(blocks), time.monotonic() - t0, _rss_mb(),
+        )
+
+        if len(text) < TEXT_LENGTH_THRESHOLD:
+            logger.info(
+                "[pdf_parser] Text below threshold (%d < %d), trying OCR…",
+                len(text), TEXT_LENGTH_THRESHOLD,
+            )
+            t1 = time.monotonic()
+            text = _extract_ocr_text(path)
+            logger.info(
+                "[pdf_parser] OCR extracted %d chars in %.2fs (rss=%.1f MB)",
+                len(text), time.monotonic() - t1, _rss_mb(),
+            )
+
         return text, blocks
     finally:
-        os.unlink(path)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        gc.collect()
 
+
+# ── Legacy helpers (kept for compat, delegate to bundle) ───────
 
 def extract_text_from_url(pdf_url: str) -> str:
-    """
-    Download a PDF from a URL and extract text.
-    Useful for extracting from Supabase Storage URLs.
-    """
-    response = requests.get(pdf_url, timeout=REQUEST_TIMEOUT_SEC)
-    response.raise_for_status()
-
-    # Write to a temp file
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp.write(response.content)
-    tmp.close()
-
-    try:
-        text = extract_text_from_path(tmp.name)
-    finally:
-        os.unlink(tmp.name)
-
+    """Compatibility shim: download + extract text only."""
+    text, _ = extract_pdf_bundle_from_url(pdf_url)
     return text
+
+
+def extract_pdf_bundle_from_path(pdf_path: str) -> Tuple[str, list]:
+    """Extract bundle from an already-local file path."""
+    t0 = time.monotonic()
+    text, blocks = _extract_pymupdf_text_and_blocks(pdf_path)
+    if len(text) < TEXT_LENGTH_THRESHOLD:
+        text = _extract_ocr_text(pdf_path)
+    logger.info(
+        "[pdf_parser] extract_pdf_bundle_from_path: %d chars in %.2fs",
+        len(text), time.monotonic() - t0,
+    )
+    return text, blocks
+
+
+def extract_text_from_path(pdf_path: str) -> str:
+    """Extract text only from a local file."""
+    text, _ = extract_pdf_bundle_from_path(pdf_path)
+    return text
+
+
+def extract_structured_blocks(pdf_path: str) -> list:
+    """Extract layout blocks only (compat shim)."""
+    _, blocks = _extract_pymupdf_text_and_blocks(pdf_path)
+    return blocks
