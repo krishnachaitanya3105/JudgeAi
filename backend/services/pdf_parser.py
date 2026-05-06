@@ -16,8 +16,10 @@ import numpy as np
 # ── Configuration ────────────────────────────────
 TEXT_LENGTH_THRESHOLD = 100  # chars; below this → fallback to OCR
 MAX_PARSE_PAGES = int(os.getenv("JUDGEAI_MAX_PARSE_PAGES", "24"))
-OCR_DPI = int(os.getenv("JUDGEAI_OCR_DPI", "220"))
+OCR_DPI = int(os.getenv("JUDGEAI_OCR_DPI", "150"))
 REQUEST_TIMEOUT_SEC = float(os.getenv("JUDGEAI_PDF_REQUEST_TIMEOUT_SEC", "30"))
+
+import concurrent.futures
 
 # Lazy-loaded EasyOCR reader (heavy initialization)
 _ocr_reader = None
@@ -53,20 +55,23 @@ def extract_text_easyocr(pdf_path: str) -> str:
     Used when PyMuPDF returns insufficient text (scanned docs).
     """
     reader = _get_ocr_reader()
-    text_parts = []
     doc = fitz.open(pdf_path)
-
     page_count = len(doc)
     end = min(page_count, MAX_PARSE_PAGES if MAX_PARSE_PAGES > 0 else page_count)
-    for page_num in range(end):
-        page = doc[page_num]
-        # Render page to a high-res pixmap and run OCR in-memory (avoid temp PNG I/O).
+
+    def process_page(page_num):
+        page = doc.load_page(page_num)
         pix = page.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csRGB)
-        n = pix.n  # channels (usually 3 for RGB)
+        n = pix.n
         img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, n)
-        results = reader.readtext(img, detail=0)
-        if results:
-            text_parts.extend(results)
+        return reader.readtext(img, detail=0)
+
+    text_parts = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as executor:
+        results = list(executor.map(process_page, range(end)))
+        for r in results:
+            if r:
+                text_parts.extend(r)
 
     doc.close()
     return "\n".join(text_parts).strip()
@@ -179,15 +184,20 @@ def extract_pdf_bundle_from_path(pdf_path: str) -> tuple:
         # OCR fallback (scanned/image-heavy docs)
         if len(text) < TEXT_LENGTH_THRESHOLD:
             reader = _get_ocr_reader()
-            ocr_parts = []
-            for page_ix in range(end):
-                page = doc.load_page(page_ix)
-                pix = page.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csRGB)
+            
+            def process_ocr_page(page_ix):
+                p = doc.load_page(page_ix)
+                pix = p.get_pixmap(dpi=OCR_DPI, colorspace=fitz.csRGB)
                 n = pix.n
                 img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, n)
-                results = reader.readtext(img, detail=0)
-                if results:
-                    ocr_parts.extend(results)
+                return reader.readtext(img, detail=0)
+
+            ocr_parts = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as executor:
+                results = list(executor.map(process_ocr_page, range(end)))
+                for r in results:
+                    if r:
+                        ocr_parts.extend(r)
             text = "\n".join(ocr_parts).strip()
 
         return text, blocks_out
