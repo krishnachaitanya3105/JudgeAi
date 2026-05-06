@@ -14,6 +14,8 @@ from backend.services.llm_extractor import extract_judgment_actions
 from backend.services.pdf_parser import extract_pdf_bundle_from_url
 from backend.utils.date_sanitize import coerce_pg_date, sanitize_action_plan_date_fields
 
+import concurrent.futures
+
 
 def run_pdf_and_llm(pdf_url: str) -> Tuple[Dict[str, Any], str, list]:
     """Download PDF → text & blocks → LLM extraction."""
@@ -65,16 +67,23 @@ def persist_extraction_record(
 
     result = supabase.table("extracted_actions").insert(record).execute()
 
-    try:
-        supabase.table("cases").update({"layout_blocks": layout_blocks}).eq("pdf_url", pdf_url).execute()
-    except Exception:
-        pass
+    def _update_layout_blocks():
+        try:
+            supabase.table("cases").update({"layout_blocks": layout_blocks}).eq("pdf_url", pdf_url).execute()
+        except Exception:
+            pass
 
-    try:
-        vec = generate_embedding(extracted_text[:12000])
-        supabase.table("cases").update({"embedding": vec}).eq("pdf_url", pdf_url).execute()
-    except Exception:
-        pass
+    def _update_embedding():
+        try:
+            vec = generate_embedding(extracted_text[:12000])
+            supabase.table("cases").update({"embedding": vec}).eq("pdf_url", pdf_url).execute()
+        except Exception:
+            pass
+
+    # Fire and forget secondary updates to reduce response latency
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        executor.submit(_update_layout_blocks)
+        executor.submit(_update_embedding)
 
     return {
         "message": "Extraction completed successfully",
