@@ -18,7 +18,9 @@ async function request(path, options = {}) {
     throw new Error('Missing VITE_API_BASE_URL. Set it in your Vercel environment variables.');
   }
 
-  const url = joinUrl(base, path);
+  // Prepend /api to the base URL to match the backend's router prefixing
+  const apiBase = `${base.replace(/\/+$/, '')}/api`;
+  const url = joinUrl(apiBase, path);
   const init = { ...options };
 
   const headers = new Headers(init.headers || {});
