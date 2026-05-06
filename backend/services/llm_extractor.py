@@ -17,6 +17,7 @@ and parses the structured JSON response containing:
 """
 
 import json
+import os
 import re
 import time
 import httpx
@@ -101,14 +102,14 @@ def extract_judgment_actions(judgment_text: str) -> dict:
         httpx.HTTPStatusError: If the Groq API returns an error.
     """
     # Truncate very long texts to stay within context window
-    max_chars = int(__import__("os").getenv(GROQ_MAX_CHARS_ENV, "24000"))
+    max_chars = int(os.getenv(GROQ_MAX_CHARS_ENV, "24000"))
     if len(judgment_text) > max_chars:
         judgment_text = judgment_text[:max_chars] + "\n\n[...truncated...]"
 
-    model = __import__("os").getenv(GROQ_MODEL_ENV, GROQ_MODEL)
-    max_tokens = int(__import__("os").getenv(GROQ_MAX_TOKENS_ENV, "1024"))
-    retries = int(__import__("os").getenv(GROQ_RETRIES_ENV, "2"))
-    timeout_sec = float(__import__("os").getenv(GROQ_TIMEOUT_ENV, "60"))
+    model = os.getenv(GROQ_MODEL_ENV, GROQ_MODEL)
+    max_tokens = int(os.getenv(GROQ_MAX_TOKENS_ENV, "1024"))
+    retries = int(os.getenv(GROQ_RETRIES_ENV, "2"))
+    timeout_sec = float(os.getenv(GROQ_TIMEOUT_ENV, "60"))
 
     payload = {
         "model": model,

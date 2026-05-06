@@ -30,18 +30,18 @@ async function request(path, options = {}) {
   const res = await fetch(url, init);
   const contentType = res.headers.get('content-type') || '';
 
-  let data = null;
+  let data;
   if (contentType.includes('application/json')) {
     try {
       data = await res.json();
     } catch {
-      data = null;
+      // Ignored
     }
   } else {
     try {
       data = await res.text();
     } catch {
-      data = null;
+      // Ignored
     }
   }
 

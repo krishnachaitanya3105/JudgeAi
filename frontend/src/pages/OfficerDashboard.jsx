@@ -21,36 +21,34 @@ export default function OfficerDashboard() {
   const [loading, setLoading] = useState(true);
   const [dashboard, setDashboard] = useState(null);
   const [pendingCases, setPendingCases] = useState([]);
-  const [actionIdByCaseNumber, setActionIdByCaseNumber] = useState({});
   const [departmentFilter, setDepartmentFilter] = useState('');
   const [caseSearch, setCaseSearch] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
+    let cancelled = false;
     const fetchData = async () => {
       try {
-        const data = await getOfficerDashboard(departmentFilter || null);
+        // Parallel fetch: dashboard stats + pending cases (removed redundant 250-record fetch)
+        const [data, pendingData] = await Promise.all([
+          getOfficerDashboard(departmentFilter || null),
+          getCases(0, 50, 'pending', departmentFilter || null, caseSearch || null),
+        ]);
+        if (cancelled) return;
         setDashboard(data);
-        const pendingData = await getCases(0, 50, 'pending', departmentFilter || null, caseSearch || null);
         setPendingCases(pendingData.data || []);
-        const allCasesData = await getCases(0, 250, null, departmentFilter || null, null);
-        const map = {};
-        (allCasesData.data || []).forEach((row) => {
-          if (row?.case_number && row?.id && !map[row.case_number]) {
-            map[row.case_number] = row.id;
-          }
-        });
-        setActionIdByCaseNumber(map);
       } catch (err) {
+        if (cancelled) return;
         const message = err.response?.data?.detail || err.message || 'Failed to load dashboard';
         setError(message);
         toast.error(message);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     fetchData();
+    return () => { cancelled = true; };
   }, [departmentFilter, caseSearch]);
 
   const getDeadlineChip = (deadline) => {
@@ -281,9 +279,9 @@ export default function OfficerDashboard() {
                 {dashboard.recent_uploads.map((item) => (
                   <tr key={item.id}>
                     <td>
-                      {(item.action_id || actionIdByCaseNumber[item.case_number]) ? (
+                      {item.action_id ? (
                         <Link
-                          to={`/case/${item.action_id || actionIdByCaseNumber[item.case_number]}`}
+                          to={`/case/${item.action_id}`}
                           style={{ fontFamily: 'monospace', color: 'var(--primary)', fontWeight: 600, fontSize: 13, textDecoration: 'none' }}
                         >
                           {item.case_number}
@@ -324,8 +322,8 @@ export default function OfficerDashboard() {
                       </span>
                     </td>
                     <td>
-                      {(item.action_id || actionIdByCaseNumber[item.case_number]) ? (
-                        <Link to={`/case/${item.action_id || actionIdByCaseNumber[item.case_number]}`} style={{ display: 'inline-flex', color: 'var(--text-muted)' }} aria-label="Open case details">
+                      {item.action_id ? (
+                        <Link to={`/case/${item.action_id}`} style={{ display: 'inline-flex', color: 'var(--text-muted)' }} aria-label="Open case details">
                           <ChevronRight size={14} />
                         </Link>
                       ) : (
