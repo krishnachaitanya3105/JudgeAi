@@ -9,6 +9,7 @@ import {
   ChevronRight,
   FileText,
   Calendar,
+  BarChart3,
 } from 'lucide-react';
 import { getOfficerDashboard, getCases } from '../lib/api';
 import toast from 'react-hot-toast';
@@ -334,11 +335,49 @@ export default function OfficerDashboard() {
                     </td>
                     <td>
                       {item.action_id ? (
-                        <Link to={`/case/${item.action_id}`} style={{ display: 'inline-flex', color: 'var(--text-muted)' }} aria-label="Open case details">
-                          <ChevronRight size={14} />
+                        <Link
+                          to={`/case/${item.action_id}`}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: '6px 8px',
+                            borderRadius: 'var(--radius-md)',
+                            background: 'transparent',
+                            color: 'var(--text-muted)',
+                            transition: 'all 0.2s ease',
+                            cursor: 'pointer',
+                            border: '1px solid transparent',
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = 'var(--primary-muted)';
+                            e.currentTarget.style.color = 'var(--primary)';
+                            e.currentTarget.style.borderColor = 'var(--primary)';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = 'transparent';
+                            e.currentTarget.style.color = 'var(--text-muted)';
+                            e.currentTarget.style.borderColor = 'transparent';
+                          }}
+                          aria-label="View case analytics"
+                          title="View case analytics"
+                        >
+                          <BarChart3 size={16} />
                         </Link>
                       ) : (
-                        <ChevronRight size={14} style={{ color: 'var(--text-muted)', opacity: 0.4 }} />
+                        <div
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: '6px 8px',
+                            color: 'var(--text-muted)',
+                            opacity: 0.3,
+                          }}
+                          title="No analytics available"
+                        >
+                          <BarChart3 size={16} />
+                        </div>
                       )}
                     </td>
                   </tr>

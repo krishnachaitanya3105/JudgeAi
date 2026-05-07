@@ -257,28 +257,29 @@ async def get_officer_dashboard(department: Optional[str] = None):
         cases_response = cases_query.order("created_at", desc=True).limit(5).execute()
         recent_uploads = [dict(r) for r in (cases_response.data or [])]
 
-        # Attach extracted action id for each recent case so UI can open /case/{action_id}.
+        # Attach extracted action id for each recent case using case_id relationship
         if recent_uploads:
-            pdf_urls = [r.get("pdf_url") for r in recent_uploads if r.get("pdf_url")]
-            if pdf_urls:
+            case_ids = [r.get("id") for r in recent_uploads if r.get("id")]
+            if case_ids:
                 try:
                     actions_resp = (
                         supabase.table("extracted_actions")
-                        .select("id,pdf_url,created_at")
-                        .in_("pdf_url", pdf_urls)
+                        .select("id,case_id")
+                        .in_("case_id", case_ids)
                         .order("created_at", desc=True)
                         .execute()
                     )
                     action_rows = actions_resp.data or []
-                    action_id_by_url: Dict[str, str] = {}
+                    action_id_by_case_id: Dict[str, str] = {}
                     for a in action_rows:
-                        url = a.get("pdf_url")
-                        if url and url not in action_id_by_url:
-                            action_id_by_url[url] = a.get("id")
+                        case_id = a.get("case_id")
+                        if case_id and case_id not in action_id_by_case_id:
+                            action_id_by_case_id[case_id] = a.get("id")
                     for row in recent_uploads:
-                        url = row.get("pdf_url")
-                        row["action_id"] = action_id_by_url.get(url) or ""
-                except Exception:
+                        case_id = row.get("id")
+                        row["action_id"] = action_id_by_case_id.get(case_id) or ""
+                except Exception as e:
+                    logger.warning("Failed to attach action_id: %s", e)
                     for row in recent_uploads:
                         row["action_id"] = ""
             else:
