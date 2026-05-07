@@ -25,7 +25,11 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from backend.config import get_supabase
-from backend.services.pipeline import persist_extraction_record, run_pdf_and_llm
+from backend.services.pipeline import (
+    persist_extraction_record,
+    run_pdf_and_llm,
+    run_secondary_case_updates,
+)
 
 logger = logging.getLogger("judgeai.extract")
 
@@ -40,6 +44,34 @@ def _cleanup_job_store() -> None:
         oldest = list(EXTRACTION_JOB_STORE.keys())[: len(EXTRACTION_JOB_STORE) - _MAX_JOBS_RETAINED]
         for k in oldest:
             del EXTRACTION_JOB_STORE[k]
+
+
+def _execute_supabase(action: str, operation, *, payload: Dict[str, Any] | None = None):
+    started = time.monotonic()
+    if payload is not None:
+        logger.info("[extract] supabase=%s before payload=%s", action, payload)
+    else:
+        logger.info("[extract] supabase=%s before", action)
+    try:
+        result = operation()
+    except Exception as exc:
+        logger.error(
+            "[extract] supabase=%s fail elapsed=%.2fs err=%s",
+            action,
+            time.monotonic() - started,
+            str(exc)[:300],
+            exc_info=True,
+        )
+        raise
+    rows = getattr(result, "data", None)
+    row_count = len(rows) if isinstance(rows, list) else (1 if rows else 0)
+    logger.info(
+        "[extract] supabase=%s after elapsed=%.2fs rows=%s",
+        action,
+        time.monotonic() - started,
+        row_count,
+    )
+    return result
 
 
 class ExtractRequest(BaseModel):
@@ -72,9 +104,42 @@ def _update_case_db_status(
             update["processing_started_at"] = started_at
         if finished_at is not None:
             update["processing_finished_at"] = finished_at
-        get_supabase().table("cases").update(update).eq("pdf_url", pdf_url).execute()
+        _execute_supabase(
+            "update_case_processing_status",
+            lambda: get_supabase().table("cases").update(update).eq("pdf_url", pdf_url).execute(),
+            payload={"pdf_url": pdf_url, **update},
+        )
     except Exception as exc:
         logger.debug("[extract] DB status sync skipped: %s", exc)
+
+
+def _update_case_status(pdf_url: str, status: str) -> None:
+    _execute_supabase(
+        "update_case_status",
+        lambda: get_supabase().table("cases").update({"status": status}).eq("pdf_url", pdf_url).execute(),
+        payload={"pdf_url": pdf_url, "status": status},
+    )
+
+
+def _fetch_latest_action_by_pdf_url(pdf_url: str) -> Dict[str, Any] | None:
+    resp = _execute_supabase(
+        "select_latest_extracted_action",
+        lambda: (
+            get_supabase()
+            .table("extracted_actions")
+            .select(
+                "id,case_number,status,created_at,pdf_url,action_plan,action_plan_reasoning,"
+                "judgment_date,department,deadline,directive,confidence_score,source_sentence"
+            )
+            .eq("pdf_url", pdf_url)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        ),
+        payload={"pdf_url": pdf_url},
+    )
+    rows = resp.data or []
+    return rows[0] if rows else None
 
 
 def _run_single_extraction_job(job_id: str, pdf_url: str) -> None:
@@ -118,33 +183,56 @@ def _run_single_extraction_job(job_id: str, pdf_url: str) -> None:
             extracted_text,
             layout_blocks,
             request_id=request_id,
+            include_secondary_updates=False,
         )
 
         db_row = (out.get("db_record") or [{}])[0]
+        action_id = db_row.get("id")
+        try:
+            run_secondary_case_updates(
+                pdf_url=pdf_url,
+                extracted_text=extracted_text,
+                layout_blocks=layout_blocks,
+                request_id=request_id,
+            )
+        except Exception as secondary_exc:
+            logger.error(
+                "[extract] req=%s job=%s secondary updates failed after primary insert: %s",
+                request_id,
+                job_id,
+                str(secondary_exc)[:200],
+                exc_info=True,
+            )
+
         finished_iso = datetime.now(timezone.utc).isoformat()
         store.update(
             {
                 "status": "completed",
                 "stage": "completed",
                 "result": out,
-                "action_id": db_row.get("id"),
+                "action_id": action_id,
                 "finished_at": finished_iso,
             }
         )
         _update_case_db_status(
             pdf_url, "completed", "completed", finished_at=finished_iso
         )
-        # Also update the legacy status field for dashboards
         try:
-            get_supabase().table("cases").update({"status": "completed"}).eq(
-                "pdf_url", pdf_url
-            ).execute()
-        except Exception:
-            pass
+            _update_case_status(pdf_url, "completed")
+        except Exception as case_status_exc:
+            logger.error(
+                "[extract] req=%s job=%s completion status write failed after insert action_id=%s: %s",
+                request_id,
+                job_id,
+                action_id,
+                str(case_status_exc)[:200],
+                exc_info=True,
+            )
+            raise
 
         logger.info(
             "[extract] req=%s job=%s DONE in %.2fs action_id=%s",
-            request_id, job_id, time.monotonic() - t_total, db_row.get("id"),
+            request_id, job_id, time.monotonic() - t_total, action_id,
         )
 
     except Exception as exc:
@@ -165,11 +253,9 @@ def _run_single_extraction_job(job_id: str, pdf_url: str) -> None:
         )
         # Revert case.status back to pending so it reappears in queue
         try:
-            get_supabase().table("cases").update({"status": "pending"}).eq(
-                "pdf_url", pdf_url
-            ).execute()
+            _update_case_status(pdf_url, "pending")
         except Exception:
-            pass
+            logger.debug("[extract] Failed to reset case status to pending for %s", pdf_url)
 
         logger.error(
             "[extract] req=%s job=%s FAILED stage=%s in %.2fs: %s",
@@ -233,9 +319,7 @@ async def extract_actions_async(payload: ExtractRequest, background_tasks: Backg
 
     # Best-effort case status update for dashboard UX
     try:
-        get_supabase().table("cases").update({"status": "processing"}).eq(
-            "pdf_url", payload.pdf_url
-        ).execute()
+        _update_case_status(payload.pdf_url, "processing")
     except Exception as e:
         logger.warning("[extract] pre-queue case status update failed: %s", e)
 
@@ -364,7 +448,41 @@ async def case_processing_status(pdf_url: str):
     ps    = row.get("processing_status") or "unknown"
     stage = row.get("processing_stage")  or "unknown"
 
+    latest_action = None
+    try:
+        latest_action = _fetch_latest_action_by_pdf_url(pdf_url)
+    except Exception as exc:
+        logger.warning("[extract] action lookup during status check failed: %s", exc)
+
     # Map DB status → job-store compatible status for frontend compatibility
+    if latest_action and ps == "processing" and stage == "db_persist" and not row.get("processing_finished_at"):
+        logger.warning(
+            "[extract] Healing stuck db_persist state for pdf_url=%s action_id=%s",
+            pdf_url,
+            latest_action.get("id"),
+        )
+        healed_finished_at = datetime.now(timezone.utc).isoformat()
+        try:
+            _update_case_db_status(
+                pdf_url,
+                "completed",
+                "completed",
+                finished_at=healed_finished_at,
+            )
+            _update_case_status(pdf_url, "completed")
+            row["processing_status"] = "completed"
+            row["processing_stage"] = "completed"
+            row["processing_finished_at"] = healed_finished_at
+            ps = "completed"
+            stage = "completed"
+        except Exception as heal_exc:
+            logger.error(
+                "[extract] Failed to heal stuck db_persist state for %s: %s",
+                pdf_url,
+                heal_exc,
+                exc_info=True,
+            )
+
     if ps == "completed":
         status = "completed"
     elif ps == "failed":
@@ -390,4 +508,25 @@ async def case_processing_status(pdf_url: str):
         "started_at":  row.get("processing_started_at"),
         "finished_at": row.get("processing_finished_at"),
         "source":      "database",
+        "result": (
+            {
+                "message": "Extraction completed successfully",
+                "status": latest_action.get("status"),
+                "extracted_data": {
+                    "case_number": latest_action.get("case_number"),
+                    "judgment_date": latest_action.get("judgment_date"),
+                    "department": latest_action.get("department"),
+                    "deadline": latest_action.get("deadline"),
+                    "directive": latest_action.get("directive"),
+                    "confidence_score": latest_action.get("confidence_score"),
+                    "source_sentence": latest_action.get("source_sentence"),
+                },
+                "action_plan": latest_action.get("action_plan"),
+                "action_plan_reasoning": latest_action.get("action_plan_reasoning"),
+                "db_record": [latest_action],
+            }
+            if latest_action and status == "completed"
+            else None
+        ),
+        "action_id": latest_action.get("id") if latest_action else None,
     }

@@ -14,10 +14,12 @@ This lets Render logs pinpoint exactly which stage OOMs or times out.
 from __future__ import annotations
 
 import gc
+import json
 import logging
-import os
+import math
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
 from backend.config import get_supabase
@@ -43,6 +45,77 @@ def _log_stage(request_id: str, stage: str, elapsed: float, ok: bool, extra: str
         "[pipeline] req=%s stage=%-24s status=%s elapsed=%.2fs rss=%.1f MB %s",
         request_id, stage, status, elapsed, _rss_mb(), extra,
     )
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively coerce arbitrary Python objects into JSON-safe values."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        return float(value) if value.is_finite() else None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _ensure_json_serializable(value: Any, *, label: str) -> Any:
+    safe = _json_safe(value)
+    try:
+        json.dumps(safe, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} is not JSON serializable: {exc}") from exc
+    return safe
+
+
+def _execute_supabase(
+    request_id: str,
+    action: str,
+    operation,
+    *,
+    payload_preview: Optional[Dict[str, Any]] = None,
+):
+    started = time.monotonic()
+    if payload_preview is not None:
+        logger.info(
+            "[pipeline] req=%s supabase=%s before payload=%s",
+            request_id,
+            action,
+            json.dumps(_json_safe(payload_preview), ensure_ascii=False)[:800],
+        )
+    else:
+        logger.info("[pipeline] req=%s supabase=%s before", request_id, action)
+
+    try:
+        result = operation()
+    except Exception as exc:
+        logger.error(
+            "[pipeline] req=%s supabase=%s fail elapsed=%.2fs err=%s",
+            request_id,
+            action,
+            time.monotonic() - started,
+            str(exc)[:300],
+            exc_info=True,
+        )
+        raise
+
+    rows = getattr(result, "data", None)
+    row_count = len(rows) if isinstance(rows, list) else (1 if rows else 0)
+    logger.info(
+        "[pipeline] req=%s supabase=%s after elapsed=%.2fs rows=%s",
+        request_id,
+        action,
+        time.monotonic() - started,
+        row_count,
+    )
+    return result
 
 
 def run_pdf_and_llm(
@@ -103,6 +176,7 @@ def persist_extraction_record(
     extracted_text: str,
     layout_blocks: list,
     request_id: str = "n/a",
+    include_secondary_updates: bool = True,
 ) -> Dict[str, Any]:
     """
     Insert extracted_actions row and enrich linked case row.
@@ -135,6 +209,10 @@ def persist_extraction_record(
 
     judgment_iso = coerce_pg_date(extracted_data.get("judgment_date"))
 
+    safe_action_plan = _ensure_json_serializable(action_plan, label="action_plan")
+    safe_reasoning = _ensure_json_serializable(reasoning, label="action_plan_reasoning")
+    safe_extracted_data = _ensure_json_serializable(extracted_data, label="extracted_data")
+
     record = {
         "case_number": extracted_data.get("case_number", "UNKNOWN"),
         "judgment_date": judgment_iso,
@@ -145,8 +223,8 @@ def persist_extraction_record(
         "source_sentence": extracted_data.get("source_sentence"),
         "pdf_url": pdf_url,
         "status": "pending",
-        "action_plan": action_plan,
-        "action_plan_reasoning": reasoning,
+        "action_plan": safe_action_plan,
+        "action_plan_reasoning": safe_reasoning,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -154,43 +232,72 @@ def persist_extraction_record(
     t = time.monotonic()
     supabase = get_supabase()
     try:
-        result = supabase.table("extracted_actions").insert(record).execute()
+        result = _execute_supabase(
+            request_id,
+            "insert_extracted_actions",
+            lambda: supabase.table("extracted_actions").insert(record).execute(),
+            payload_preview={
+                "case_number": record["case_number"],
+                "pdf_url": pdf_url,
+                "department": record["department"],
+                "deadline": record["deadline"],
+                "status": record["status"],
+            },
+        )
     except Exception as exc:
         _log_stage(request_id, "db_insert", time.monotonic() - t, False, str(exc)[:120])
         raise ValueError(f"Database insert failed: {exc}") from exc
     _log_stage(request_id, "db_insert", time.monotonic() - t, True)
 
     # ── Stage 5: Secondary updates (best-effort, non-blocking) ─
-    _run_secondary_updates(supabase, pdf_url, extracted_text, layout_blocks, request_id)
+    if include_secondary_updates:
+        run_secondary_case_updates(
+            pdf_url=pdf_url,
+            extracted_text=extracted_text,
+            layout_blocks=layout_blocks,
+            request_id=request_id,
+            supabase=supabase,
+        )
 
     return {
         "message": "Extraction completed successfully",
-        "extracted_data": extracted_data,
-        "action_plan": action_plan,
-        "action_plan_reasoning": reasoning,
+        "extracted_data": safe_extracted_data,
+        "action_plan": safe_action_plan,
+        "action_plan_reasoning": safe_reasoning,
         "status": record["status"],
         "db_record": result.data,
     }
 
 
-def _run_secondary_updates(
-    supabase,
+def run_secondary_case_updates(
     pdf_url: str,
     extracted_text: str,
     layout_blocks: list,
     request_id: str,
+    supabase=None,
 ) -> None:
     """
     Embedding + layout_blocks updates are secondary; failures must not
     crash the main extraction result.  Run them inline (no extra thread)
     to avoid spawning threads on an already-strained Render process.
     """
+    supabase = supabase or get_supabase()
+    safe_layout_blocks = _ensure_json_serializable(layout_blocks, label="layout_blocks")
+
     # Embedding
     t = time.monotonic()
     try:
         # Truncated to 3000 chars — MiniLM only uses ~512 tokens anyway
         vec = generate_embedding(extracted_text[:3000])
-        supabase.table("cases").update({"embedding": vec}).eq("pdf_url", pdf_url).execute()
+        _execute_supabase(
+            request_id,
+            "update_case_embedding",
+            lambda: supabase.table("cases").update({"embedding": vec}).eq("pdf_url", pdf_url).execute(),
+            payload_preview={
+                "pdf_url": pdf_url,
+                "embedding_dimensions": len(vec) if isinstance(vec, list) else None,
+            },
+        )
         _log_stage(request_id, "embedding_update", time.monotonic() - t, True)
     except Exception as exc:
         _log_stage(request_id, "embedding_update", time.monotonic() - t, False, str(exc)[:80])
@@ -200,7 +307,15 @@ def _run_secondary_updates(
     # Layout blocks
     t = time.monotonic()
     try:
-        supabase.table("cases").update({"layout_blocks": layout_blocks}).eq("pdf_url", pdf_url).execute()
+        _execute_supabase(
+            request_id,
+            "update_case_layout_blocks",
+            lambda: supabase.table("cases").update({"layout_blocks": safe_layout_blocks}).eq("pdf_url", pdf_url).execute(),
+            payload_preview={
+                "pdf_url": pdf_url,
+                "layout_blocks_count": len(safe_layout_blocks) if isinstance(safe_layout_blocks, list) else None,
+            },
+        )
         _log_stage(request_id, "layout_blocks_update", time.monotonic() - t, True)
     except Exception as exc:
         _log_stage(request_id, "layout_blocks_update", time.monotonic() - t, False, str(exc)[:80])

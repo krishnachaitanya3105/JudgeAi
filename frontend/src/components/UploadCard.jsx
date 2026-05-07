@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, FileCheck, Loader2, AlertCircle, Layers, RefreshCw } from 'lucide-react';
+import { Upload, FileCheck, Loader2, AlertCircle, Layers, RefreshCw, CheckCircle2 } from 'lucide-react';
 import {
   uploadPdf,
   uploadBatchPdfs,
@@ -27,6 +27,7 @@ function stageLabel(stage, elapsedSec) {
 const POLL_INTERVAL_MS   = 3000;  // 3 s between polls
 const MAX_POLLS          = 120;   // 6 min max
 const MAX_POLL_ERRORS    = 4;     // stop after 4 consecutive network errors
+const MAX_STAGE_STALL_MS = 45_000;
 
 export default function UploadCard({ onExtractionComplete }) {
   const [status,          setStatus]          = useState('idle');
@@ -34,6 +35,7 @@ export default function UploadCard({ onExtractionComplete }) {
   const [error,           setError]           = useState('');
   const [progress,        setProgress]        = useState('');
   const [progressPercent, setProgressPercent] = useState(0);
+  const [stageMeta,       setStageMeta]       = useState({ stage: '', source: '', elapsedSec: 0 });
 
   // Ref so polling loop can be cancelled when component unmounts
   const abortRef = useRef(null);
@@ -53,6 +55,7 @@ export default function UploadCard({ onExtractionComplete }) {
     const signal = abortRef.current.signal;
 
     setError('');
+    setStageMeta({ stage: '', source: '', elapsedSec: 0 });
 
     // ── Batch upload ─────────────────────────────────────────
     if (list.length > 1) {
@@ -60,6 +63,7 @@ export default function UploadCard({ onExtractionComplete }) {
       setStatus('extracting');
       setProgress(`Queueing batch job (${list.length} files)…`);
       setProgressPercent(0);
+      setStageMeta({ stage: 'queued', source: 'memory', elapsedSec: 0 });
       const tid = toast.loading('Uploading batch…');
 
       try {
@@ -85,6 +89,7 @@ export default function UploadCard({ onExtractionComplete }) {
     setStatus('uploading');
     setProgress('Uploading PDF to secure storage…');
     setProgressPercent(0);
+      setStageMeta({ stage: 'uploading', source: 'client', elapsedSec: 0 });
     toast.loading('Uploading PDF…', { id: 'upload' });
 
     try {
@@ -95,6 +100,7 @@ export default function UploadCard({ onExtractionComplete }) {
       setStatus('extracting');
       setProgress('Queuing AI extraction…');
       setProgressPercent(10);
+      setStageMeta({ stage: 'queued', source: 'memory', elapsedSec: 0 });
       toast.loading('Extraction queued. Processing in background…', { id: 'upload' });
 
       // Step 2: queue async extraction
@@ -103,13 +109,14 @@ export default function UploadCard({ onExtractionComplete }) {
 
       // Step 3: poll for completion — passes pdfUrl for DB fallback on restart
       const extractResult = await _pollUntilDone(
-        queued.job_id, uploadResult.pdf_url, signal, setProgress
+        queued.job_id, uploadResult.pdf_url, signal, setProgress, setStageMeta
       );
       if (signal.aborted) return;
 
       setStatus('done');
       setProgress('Extraction complete!');
       setProgressPercent(100);
+      setStageMeta((prev) => ({ ...prev, stage: 'completed' }));
       toast.success('PDF uploaded and extracted successfully', { id: 'upload' });
       onExtractionComplete?.(extractResult);
 
@@ -138,6 +145,7 @@ export default function UploadCard({ onExtractionComplete }) {
     setError('');
     setProgress('');
     setProgressPercent(0);
+    setStageMeta({ stage: '', source: '', elapsedSec: 0 });
   };
 
   // ── Styles ────────────────────────────────────────────────
@@ -213,6 +221,27 @@ export default function UploadCard({ onExtractionComplete }) {
           <>
             <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--primary)', marginBottom: 8 }}>{progress}</p>
             <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>{fileName}</p>
+            {status === 'extracting' && stageMeta.stage && (
+              <div
+                className="status-inline-card animate-fade-in"
+                style={{
+                  maxWidth: 340,
+                  margin: '14px auto 0',
+                  textAlign: 'left',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                  <span className="text-caption">Live Status</span>
+                  <span className="chip chip-info">{stageMeta.source === 'database' ? 'Recovered' : 'Live'}</span>
+                </div>
+                <p style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 600, marginTop: 8 }}>
+                  {STAGE_LABELS[stageMeta.stage] || 'Processing…'}
+                </p>
+                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Elapsed: {stageMeta.elapsedSec || 0}s
+                </p>
+              </div>
+            )}
             {status === 'uploading' && (
               <div style={{ maxWidth: 300, margin: '16px auto 0' }}>
                 <div style={{ height: 6, borderRadius: 'var(--radius-full)', background: 'var(--bg-card)', overflow: 'hidden' }}>
@@ -232,6 +261,18 @@ export default function UploadCard({ onExtractionComplete }) {
           <>
             <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--success)', marginBottom: 8 }}>✓ {progress}</p>
             <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>{fileName}</p>
+            <div
+              className="status-inline-card animate-fade-in"
+              style={{ maxWidth: 360, margin: '14px auto 0', textAlign: 'left' }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--success-text)' }}>
+                <CheckCircle2 size={16} />
+                <span style={{ fontSize: 13, fontWeight: 600 }}>Database status finalized</span>
+              </div>
+              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
+                Final stage: {STAGE_LABELS[stageMeta.stage] || 'Extraction complete!'}
+              </p>
+            </div>
           </>
         )}
 
@@ -264,11 +305,13 @@ export default function UploadCard({ onExtractionComplete }) {
  *  2. On 410 Gone (backend restarted), switch to
  *     polling /case-processing-status?pdf_url=... (DB-backed, restart-safe)
  */
-async function _pollUntilDone(jobId, pdfUrl, signal, setProgress) {
+async function _pollUntilDone(jobId, pdfUrl, signal, setProgress, setStageMeta) {
   let poll = 0;
   let consecutiveErrors = 0;
   let useDbFallback = false;  // flip to true on 410
   const start = Date.now();
+  let lastStage = 'queued';
+  let lastStageAt = Date.now();
 
   while (poll < MAX_POLLS) {
     if (signal.aborted) return null;
@@ -321,9 +364,20 @@ async function _pollUntilDone(jobId, pdfUrl, signal, setProgress) {
       continue;
     }
 
+    const currentStage = st.stage || st.status || 'processing';
+    if (currentStage !== lastStage) {
+      lastStage = currentStage;
+      lastStageAt = Date.now();
+    }
+
     // Update progress label using stage from server
     const source = useDbFallback ? ' [DB]' : '';
     setProgress(stageLabel(st.stage || st.status, elapsedSec) + source);
+    setStageMeta?.({
+      stage: currentStage,
+      source: st.source || (useDbFallback ? 'database' : 'memory'),
+      elapsedSec,
+    });
 
     if (st.status === 'completed') {
       return st.result || st;  // DB path returns the row itself, not .result
@@ -333,6 +387,22 @@ async function _pollUntilDone(jobId, pdfUrl, signal, setProgress) {
       const stage  = st.error_stage ? ` [stage: ${st.error_stage}]` : st.stage ? ` [stage: ${st.stage}]` : '';
       const reason = st.error || 'Extraction job failed';
       throw new Error(`${reason}${stage}`);
+    }
+
+    if (
+      st.status === 'processing' &&
+      currentStage === 'db_persist' &&
+      Date.now() - lastStageAt > MAX_STAGE_STALL_MS
+    ) {
+      if (!useDbFallback && pdfUrl) {
+        useDbFallback = true;
+        setProgress(`Verifying final database status… (${elapsedSec}s)`);
+        continue;
+      }
+
+      throw new Error(
+        'Database persistence is taking too long. The job was prevented from staying in an infinite processing state.'
+      );
     }
   }
 
