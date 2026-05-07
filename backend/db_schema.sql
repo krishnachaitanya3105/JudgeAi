@@ -4,6 +4,8 @@
 -- Supabase (PostgreSQL) schema for court judgment management system
 -- ═════════════════════════════════════════════════════════════════
 
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- ──────────────────────────────────────────────────────────────────
 -- 1. USERS TABLE (if managing officers/admins)
 -- ──────────────────────────────────────────────────────────────────
@@ -29,6 +31,15 @@ CREATE TABLE IF NOT EXISTS cases (
     uploaded_by VARCHAR(255),
     department VARCHAR(255),
     status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'archived')),
+    processing_status TEXT DEFAULT NULL,
+    processing_stage TEXT DEFAULT NULL,
+    processing_error TEXT DEFAULT NULL,
+    processing_job_id TEXT DEFAULT NULL,
+    processing_started_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    processing_finished_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    processing_heartbeat_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+    layout_blocks JSONB DEFAULT NULL,
+    embedding vector(384),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     indexed_at TIMESTAMP WITH TIME ZONE
@@ -38,6 +49,9 @@ CREATE INDEX idx_cases_case_number ON cases(case_number);
 CREATE INDEX idx_cases_status ON cases(status);
 CREATE INDEX idx_cases_department ON cases(department);
 CREATE INDEX idx_cases_created_at ON cases(created_at DESC);
+CREATE INDEX idx_cases_processing_status ON cases(processing_status);
+CREATE INDEX idx_cases_processing_job_id ON cases(processing_job_id);
+CREATE INDEX idx_cases_pdf_url ON cases(pdf_url);
 
 -- ──────────────────────────────────────────────────────────────────
 -- 3. EXTRACTED_ACTIONS TABLE (Main extraction results)
@@ -56,6 +70,8 @@ CREATE TABLE IF NOT EXISTS extracted_actions (
     status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'edited', 'rejected', 'completed')),
     rejection_reason TEXT,
     human_verified_values JSONB,
+    action_plan JSONB DEFAULT NULL,
+    action_plan_reasoning JSONB DEFAULT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

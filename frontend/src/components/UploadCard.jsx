@@ -12,11 +12,14 @@ import toast from 'react-hot-toast';
 
 // ── Stage → human-readable label ─────────────────────────────
 const STAGE_LABELS = {
-  queued:        'Waiting in queue…',
-  pdf_extraction:'Extracting PDF text…',
-  llm_extraction:'AI analysing judgment…',
-  db_persist:    'Saving to database…',
-  completed:     'Extraction complete!',
+  queued:               'Waiting in queue…',
+  pdf_extraction:       'Extracting PDF text…',
+  llm_extraction:       'AI analysing judgment…',
+  analytics_generation: 'Generating analytics…',
+  db_persist:           'Saving extraction to database…',
+  secondary_enrichment: 'Finalizing embeddings and highlights…',
+  completed:            'Extraction complete!',
+  failed:               'Extraction failed',
 };
 
 function stageLabel(stage, elapsedSec) {
@@ -25,9 +28,10 @@ function stageLabel(stage, elapsedSec) {
 }
 
 const POLL_INTERVAL_MS   = 3000;  // 3 s between polls
-const MAX_POLLS          = 120;   // 6 min max
+const MAX_POLLS          = 180;   // 9 min max
 const MAX_POLL_ERRORS    = 4;     // stop after 4 consecutive network errors
-const MAX_STAGE_STALL_MS = 45_000;
+const MAX_STAGE_STALL_MS = 150_000;
+const MAX_HEARTBEAT_AGE_MS = 180_000;
 
 export default function UploadCard({ onExtractionComplete }) {
   const [status,          setStatus]          = useState('idle');
@@ -365,6 +369,8 @@ async function _pollUntilDone(jobId, pdfUrl, signal, setProgress, setStageMeta) 
     }
 
     const currentStage = st.stage || st.status || 'processing';
+    const heartbeatAt = st.heartbeat_at ? Date.parse(st.heartbeat_at) : NaN;
+    const heartbeatAgeMs = Number.isNaN(heartbeatAt) ? null : Date.now() - heartbeatAt;
     if (currentStage !== lastStage) {
       lastStage = currentStage;
       lastStageAt = Date.now();
@@ -389,9 +395,16 @@ async function _pollUntilDone(jobId, pdfUrl, signal, setProgress, setStageMeta) 
       throw new Error(`${reason}${stage}`);
     }
 
+    if (heartbeatAgeMs !== null && heartbeatAgeMs > MAX_HEARTBEAT_AGE_MS && useDbFallback) {
+      throw new Error(
+        st.error ||
+        'Processing stopped reporting progress for too long. The worker likely restarted or was terminated.'
+      );
+    }
+
     if (
       st.status === 'processing' &&
-      currentStage === 'db_persist' &&
+      ['db_persist', 'secondary_enrichment'].includes(currentStage) &&
       Date.now() - lastStageAt > MAX_STAGE_STALL_MS
     ) {
       if (!useDbFallback && pdfUrl) {
@@ -400,8 +413,14 @@ async function _pollUntilDone(jobId, pdfUrl, signal, setProgress, setStageMeta) 
         continue;
       }
 
+      if (heartbeatAgeMs !== null && heartbeatAgeMs <= MAX_HEARTBEAT_AGE_MS) {
+        setProgress(`Finalizing extraction… (${elapsedSec}s)`);
+        continue;
+      }
+
       throw new Error(
-        'Database persistence is taking too long. The job was prevented from staying in an infinite processing state.'
+        st.error ||
+        'Finalization stopped progressing. The job was prevented from remaining in an infinite processing state.'
       );
     }
   }

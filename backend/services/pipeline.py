@@ -170,21 +170,22 @@ def run_pdf_and_llm(
     return extracted_data, extracted_text, layout_blocks
 
 
-def persist_extraction_record(
+def build_extraction_artifacts(
     pdf_url: str,
     extracted_data: Dict[str, Any],
     extracted_text: str,
-    layout_blocks: list,
+    *,
     request_id: str = "n/a",
-    include_secondary_updates: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Insert extracted_actions row and enrich linked case row.
-    Secondary updates (embedding, layout_blocks) are best-effort.
-    """
     from backend.utils.date_sanitize import coerce_pg_date, sanitize_action_plan_date_fields
 
-    # ── Stage 3: Action plan generation ───────────────────────
+    logger.info(
+        "ANALYTICS_GENERATED request_id=%s pdf_url=%s payload_chars=%d",
+        request_id,
+        pdf_url[:120],
+        len(extracted_text or ""),
+    )
+
     t = time.monotonic()
     try:
         action_plan, reasoning = generate_action_plan(
@@ -228,7 +229,25 @@ def persist_extraction_record(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # ── Stage 4: Supabase insert ───────────────────────────────
+    return {
+        "record": record,
+        "safe_action_plan": safe_action_plan,
+        "safe_reasoning": safe_reasoning,
+        "safe_extracted_data": safe_extracted_data,
+    }
+
+
+def insert_extraction_record(
+    record: Dict[str, Any],
+    *,
+    request_id: str = "n/a",
+):
+    logger.info(
+        "DB_PERSIST_STARTED request_id=%s case_number=%s pdf_url=%s",
+        request_id,
+        record.get("case_number"),
+        str(record.get("pdf_url", ""))[:120],
+    )
     t = time.monotonic()
     supabase = get_supabase()
     try:
@@ -238,7 +257,7 @@ def persist_extraction_record(
             lambda: supabase.table("extracted_actions").insert(record).execute(),
             payload_preview={
                 "case_number": record["case_number"],
-                "pdf_url": pdf_url,
+                "pdf_url": record["pdf_url"],
                 "department": record["department"],
                 "deadline": record["deadline"],
                 "status": record["status"],
@@ -248,6 +267,39 @@ def persist_extraction_record(
         _log_stage(request_id, "db_insert", time.monotonic() - t, False, str(exc)[:120])
         raise ValueError(f"Database insert failed: {exc}") from exc
     _log_stage(request_id, "db_insert", time.monotonic() - t, True)
+    logger.info(
+        "DB_PERSIST_COMPLETED request_id=%s case_number=%s rows=%s",
+        request_id,
+        record.get("case_number"),
+        len(result.data or []),
+    )
+    return result
+
+
+def persist_extraction_record(
+    pdf_url: str,
+    extracted_data: Dict[str, Any],
+    extracted_text: str,
+    layout_blocks: list,
+    request_id: str = "n/a",
+    include_secondary_updates: bool = True,
+) -> Dict[str, Any]:
+    """
+    Insert extracted_actions row and enrich linked case row.
+    Secondary updates (embedding, layout_blocks) are best-effort.
+    """
+    artifacts = build_extraction_artifacts(
+        pdf_url,
+        extracted_data,
+        extracted_text,
+        request_id=request_id,
+    )
+    record = artifacts["record"]
+    safe_action_plan = artifacts["safe_action_plan"]
+    safe_reasoning = artifacts["safe_reasoning"]
+    safe_extracted_data = artifacts["safe_extracted_data"]
+    result = insert_extraction_record(record, request_id=request_id)
+    supabase = get_supabase()
 
     # ── Stage 5: Secondary updates (best-effort, non-blocking) ─
     if include_secondary_updates:
@@ -284,6 +336,7 @@ def run_secondary_case_updates(
     supabase = supabase or get_supabase()
     safe_layout_blocks = _ensure_json_serializable(layout_blocks, label="layout_blocks")
 
+    logger.info("EMBEDDING_STARTED request_id=%s pdf_url=%s", request_id, pdf_url[:120])
     # Embedding
     t = time.monotonic()
     try:
@@ -299,11 +352,13 @@ def run_secondary_case_updates(
             },
         )
         _log_stage(request_id, "embedding_update", time.monotonic() - t, True)
+        logger.info("EMBEDDING_COMPLETED request_id=%s pdf_url=%s", request_id, pdf_url[:120])
     except Exception as exc:
         _log_stage(request_id, "embedding_update", time.monotonic() - t, False, str(exc)[:80])
     finally:
         gc.collect()
 
+    logger.info("DB_PERSIST_STARTED request_id=%s stage=layout_blocks pdf_url=%s", request_id, pdf_url[:120])
     # Layout blocks
     t = time.monotonic()
     try:
@@ -317,5 +372,6 @@ def run_secondary_case_updates(
             },
         )
         _log_stage(request_id, "layout_blocks_update", time.monotonic() - t, True)
+        logger.info("DB_PERSIST_COMPLETED request_id=%s stage=layout_blocks pdf_url=%s", request_id, pdf_url[:120])
     except Exception as exc:
         _log_stage(request_id, "layout_blocks_update", time.monotonic() - t, False, str(exc)[:80])

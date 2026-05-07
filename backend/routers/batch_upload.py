@@ -21,6 +21,7 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Uploa
 
 from backend.config import SUPABASE_STORAGE_BUCKET, SUPABASE_URL, get_supabase
 from backend.services.pipeline import persist_extraction_record, run_pdf_and_llm
+from backend.services.processing_state import update_case_processing_status, update_case_status
 
 logger = logging.getLogger("judgeai.batch_upload")
 router = APIRouter()
@@ -50,7 +51,6 @@ def _run_job(job_id: str, items: List[Dict[str, Any]]) -> None:
     Process batch items concurrently (up to _BATCH_CONCURRENCY at a time).
     Each item runs run_pdf_and_llm → persist_extraction_record in its own thread.
     """
-    import asyncio
     import concurrent.futures
 
     JOB_STORE[job_id]["status"] = "processing"
@@ -72,14 +72,38 @@ def _run_job(job_id: str, items: List[Dict[str, Any]]) -> None:
         request_id = uuid.uuid4().hex[:8]
         t_file = time.monotonic()
         try:
+            update_case_processing_status(
+                pdf_url,
+                "processing",
+                "pdf_extraction",
+                job_id=job_id,
+                clear_error=True,
+            )
             extracted_data, extracted_text, layout_blocks = run_pdf_and_llm(
                 pdf_url, request_id=request_id
+            )
+            update_case_processing_status(
+                pdf_url,
+                "processing",
+                "db_persist",
+                job_id=job_id,
+                clear_error=True,
             )
             out = persist_extraction_record(
                 pdf_url, extracted_data, extracted_text, layout_blocks,
                 request_id=request_id,
             )
             action_id = (out.get("db_record") or [{}])[0].get("id")
+            finished_at = datetime.now(timezone.utc).isoformat()
+            update_case_processing_status(
+                pdf_url,
+                "completed",
+                "completed",
+                job_id=job_id,
+                finished_at=finished_at,
+                clear_error=True,
+            )
+            update_case_status(pdf_url, "completed")
             with results_lock:
                 successes.append(
                     {"pdf_url": pdf_url, "filename": filename, "action_id": action_id}
@@ -89,6 +113,19 @@ def _run_job(job_id: str, items: List[Dict[str, Any]]) -> None:
                 job_id, request_id, filename, time.monotonic() - t_file, action_id,
             )
         except Exception as e:
+            finished_at = datetime.now(timezone.utc).isoformat()
+            try:
+                update_case_processing_status(
+                    pdf_url,
+                    "failed",
+                    "batch_processing",
+                    job_id=job_id,
+                    error=str(e),
+                    finished_at=finished_at,
+                )
+                update_case_status(pdf_url, "pending")
+            except Exception as sync_exc:
+                logger.error("[batch] failed to sync case failure state for %s: %s", pdf_url, sync_exc, exc_info=True)
             with results_lock:
                 errors.append(
                     {"pdf_url": pdf_url, "filename": filename, "detail": str(e)}
@@ -188,6 +225,11 @@ async def upload_batch(
             "uploaded_by": uploaded_by,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "processing",
+            "processing_status": "queued",
+            "processing_stage": "queued",
+            "processing_job_id": job_id,
+            "processing_started_at": datetime.now(timezone.utc).isoformat(),
+            "processing_heartbeat_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
             supabase.table("cases").insert(md).execute()

@@ -41,6 +41,7 @@ async def upload_pdf(
             status_code=400,
             detail="Only PDF files are accepted.",
         )
+    logger.info("UPLOAD_RECEIVED filename=%s uploaded_by=%s", file.filename, uploaded_by)
 
     # ── Validate file size (50 MB limit) ─────────
     max_size = 50 * 1024 * 1024  # 50 MB

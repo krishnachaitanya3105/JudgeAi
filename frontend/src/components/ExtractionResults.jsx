@@ -61,6 +61,7 @@ export default function ExtractionResults({ data }) {
   const actionPlan = data.action_plan || null;
   const reasoning = data.action_plan_reasoning || {};
   const fusedUi = resolveFusedScore(reasoning, extracted, actionPlan);
+  const displayStatus = data.workflow_status || data.status || data.action_status;
 
   return (
     <section style={{ maxWidth: 720, margin: '0 auto', padding: '48px 24px' }}>
@@ -178,11 +179,11 @@ export default function ExtractionResults({ data }) {
       </div>
 
       {/* Status Badge */}
-      {data.status && (
+      {displayStatus && (
         <div className="animate-fade-in-up" style={{ textAlign: 'center', marginTop: 24 }}>
           <span className="chip chip-pending">
             <Clock size={12} />
-            Status: {data.status}
+            Status: {displayStatus}
           </span>
         </div>
       )}

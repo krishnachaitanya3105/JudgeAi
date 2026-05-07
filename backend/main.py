@@ -45,9 +45,19 @@ _START_TIME = time.time()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from backend.services.notification_scheduler import shutdown_scheduler, start_scheduler
+    from backend.services.processing_state import recover_stale_processing_cases
 
     _logger.info("JudgeAI v%s starting up (log_level=%s)…", APP_VERSION, _log_level)
     start_scheduler()
+    try:
+        summary = recover_stale_processing_cases()
+        _logger.info(
+            "Startup recovery complete: completed=%s failed=%s",
+            summary.get("completed", 0),
+            summary.get("failed", 0),
+        )
+    except Exception as exc:
+        _logger.error("Startup recovery failed: %s", exc, exc_info=True)
     try:
         yield
     finally:
@@ -126,8 +136,6 @@ app.include_router(search_router.router,  prefix="/api", tags=["Search"])
 @app.get("/", tags=["Health"])
 async def health_check():
     """Primary health endpoint. Returns quickly even if DB is slow."""
-    import asyncio
-    
     uptime_sec = round(time.time() - _START_TIME, 1)
     db_ok = False
     db_error = None
@@ -136,8 +144,8 @@ async def health_check():
         # Use asyncio timeout to prevent hanging on DB issues
         from backend.config import get_supabase
         
-        async def check_db():
-            """Non-blocking DB check wrapped in timeout."""
+        def check_db():
+            """Blocking DB check moved off the event loop."""
             try:
                 get_supabase().table("cases").select("id").limit(1).execute()
                 return True, None
