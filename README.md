@@ -4,112 +4,265 @@
 
 ---
 
-## 🏗️ Architecture
+## 🌐 Live Demo
 
-```
+Frontend: https://judge-ai-nu.vercel.app/login
+
+Backend API Docs: https://judgeai-x9c6.onrender.com/docs
+
+GitHub Repository: https://github.com/krishnachaitanya3105/JudgeAi
+
+---
+
+## 📌 Overview
+
+JudgeAI is an AI-powered legal analysis platform designed to process court judgment PDFs and extract structured legal insights automatically. The system uses OCR, NLP, and Large Language Models to analyze legal documents and generate actionable summaries, compliance directives, deadlines, and analytics.
+
+The platform helps simplify legal document review by transforming unstructured court judgments into structured and searchable information.
+
+---
+
+## 🏗️ Project Architecture
+
+```text
 judgeai/
  ├── backend/
  │   ├── main.py              # FastAPI application entry point
- │   ├── config.py             # Environment config + Supabase client
+ │   ├── config.py            # Environment configuration
  │   ├── routers/
- │   │   ├── upload.py         # POST /upload-pdf
- │   │   └── extract.py        # POST /extract-actions
+ │   │   ├── upload.py        # PDF upload APIs
+ │   │   └── extract.py       # AI extraction APIs
  │   ├── services/
- │   │   ├── pdf_parser.py     # PyMuPDF + EasyOCR extraction
- │   │   └── llm_extractor.py  # Groq LLaMA3-8B pipeline
+ │   │   ├── pdf_parser.py    # PDF text extraction
+ │   │   └── llm_extractor.py # Groq LLM processing
  │   ├── models/
- │   │   └── schemas.py        # Pydantic validation schemas
+ │   │   └── schemas.py       # Pydantic schemas
  │   └── utils/
- │       └── helpers.py        # Shared utility functions
+ │       └── helpers.py       # Utility functions
  │
- ├── frontend/                 # React + Tailwind + shadcn/ui
+ ├── frontend/
  │   ├── src/
  │   └── components/
  │
- ├── .env                      # Environment variables
- ├── requirements.txt          # Python dependencies
+ ├── requirements.txt
+ ├── .env
  └── README.md
 ```
 
-## 🚀 Tech Stack
+---
 
-| Layer     | Technology                         |
-| --------- | ---------------------------------- |
-| Backend   | FastAPI, Python 3.11+              |
-| Frontend  | React, Vite, Tailwind CSS, shadcn/ui |
-| Database  | Supabase (PostgreSQL)              |
-| Storage   | Supabase Storage                   |
-| AI/LLM    | Groq LLaMA3-8B                     |
-| OCR       | PyMuPDF + EasyOCR                  |
+## 🚀 Features
 
-## 📦 Setup
+- Upload and analyze court judgment PDFs
+- AI-generated legal summaries
+- Action and directive extraction
+- Deadline identification
+- Confidence score generation
+- OCR-based PDF text extraction
+- Structured legal analytics dashboard
+- FastAPI backend with Swagger documentation
+- Responsive React frontend UI
 
-### Backend
+---
 
-```bash
-# Create virtual environment
-python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # macOS/Linux
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Start the server
-uvicorn backend.main:app --reload --port 8000
-```
+## 🛠️ Tech Stack
 
 ### Frontend
+- React.js
+- Vite
+- Tailwind CSS
+- shadcn/ui
+
+### Backend
+- FastAPI
+- Python 3.11+
+
+### AI & NLP
+- Groq LLaMA3-8B
+- NLP-based legal analysis
+
+### OCR & PDF Processing
+- PyMuPDF
+- EasyOCR
+
+### Database & Deployment
+- Supabase
+- Render
+- Vercel
+
+---
+
+# ⚙️ Installation & Setup
+
+## Prerequisites
+
+Make sure the following are installed:
+
+- Node.js (v18 or above)
+- Python 3.10+
+- pip
+- Git
+
+---
+
+## 1. Clone the Repository
 
 ```bash
-cd frontend
-npm install
-npm run dev
+git clone https://github.com/krishnachaitanya3105/JudgeAi.git
+cd JudgeAi
 ```
 
-### Environment Variables
+---
 
-Copy `.env.example` to `.env` and fill in your credentials:
+# 🔧 Backend Setup
+
+## Navigate to Backend
+
+```bash
+cd backend
+```
+
+## Create Virtual Environment
+
+### Windows
+
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
+
+### macOS / Linux
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+---
+
+## Install Backend Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## Backend Environment Variables
+
+Create a `.env` file inside the backend folder and add:
 
 ```env
+PORT=5000
 SUPABASE_URL=your_supabase_url
-SUPABASE_KEY=your_service_role_key
+SUPABASE_KEY=your_supabase_key
 SUPABASE_STORAGE_BUCKET=court-judgments
 GROQ_API_KEY=your_groq_api_key
 ```
 
-## 🔌 API Endpoints
+---
 
-### `POST /api/upload-pdf`
+## Run Backend Server
 
-Upload a court judgment PDF to Supabase Storage.
+```bash
+uvicorn main:app --reload --port 5000
+```
 
-**Request:** `multipart/form-data`
-- `file` — PDF file (required)
-- `uploaded_by` — uploader name (default: `"system"`)
+Backend will run at:
 
-**Response:**
+```text
+http://localhost:5000
+```
+
+Swagger API Docs:
+
+```text
+http://localhost:5000/docs
+```
+
+---
+
+# 🎨 Frontend Setup
+
+## Navigate to Frontend
+
+```bash
+cd frontend
+```
+
+---
+
+## Install Frontend Dependencies
+
+```bash
+npm install
+```
+
+---
+
+## Frontend Environment Variables
+
+Create a `.env` file inside the frontend folder and add:
+
+```env
+VITE_API_BASE_URL=http://localhost:5000
+```
+
+---
+
+## Run Frontend
+
+```bash
+npm run dev
+```
+
+Frontend will run at:
+
+```text
+http://localhost:5173
+```
+
+---
+
+# 📄 API Endpoints
+
+## POST `/api/upload-pdf`
+
+Uploads a court judgment PDF.
+
+### Request
+- Content-Type: `multipart/form-data`
+
+### Parameters
+- `file` → PDF file
+- `uploaded_by` → uploader name
+
+### Response
+
 ```json
 {
   "message": "PDF uploaded successfully",
   "case_number": "CASE-A1B2C3D4E5",
-  "pdf_url": "https://...",
-  "metadata": { ... }
+  "pdf_url": "https://example.com/sample.pdf"
 }
 ```
 
-### `POST /api/extract-actions`
+---
 
-Extract structured data from a court judgment.
+## POST `/api/extract-actions`
 
-**Request:**
+Extracts structured legal information from uploaded judgments.
+
+### Request
+
 ```json
 {
-  "pdf_url": "https://your-supabase-url/storage/v1/object/public/court-judgments/..."
+  "pdf_url": "https://your-storage-url/sample.pdf"
 }
 ```
 
-**Response:**
+### Response
+
 ```json
 {
   "extracted_data": {
@@ -120,35 +273,77 @@ Extract structured data from a court judgment.
     "directive": "Submit compliance report within 90 days",
     "confidence_score": 0.85
   },
-  "status": "pending"
+  "status": "success"
 }
 ```
 
-## 🗄️ Supabase Tables
+---
 
-### `cases`
-| Column       | Type      | Description              |
-| ------------ | --------- | ------------------------ |
-| id           | uuid (PK) | Auto-generated           |
-| case_number  | text      | Unique case identifier   |
-| pdf_url      | text      | Public storage URL       |
-| uploaded_by  | text      | Uploader name            |
-| created_at   | timestamp | Upload timestamp         |
+# 🗄️ Database Schema
 
-### `extracted_actions`
-| Column           | Type      | Description                |
-| ---------------- | --------- | -------------------------- |
-| id               | uuid (PK) | Auto-generated             |
-| case_number      | text      | Extracted case number      |
-| judgment_date    | text      | Date of judgment           |
-| department       | text      | Responsible department     |
-| deadline         | text      | Compliance deadline        |
-| directive        | text      | Required action/order      |
-| confidence_score | float     | Extraction confidence 0-1  |
-| pdf_url          | text      | Source PDF URL             |
-| status           | text      | Processing status          |
-| created_at       | timestamp | Extraction timestamp       |
+## `cases` Table
 
-## 📜 License
+| Column | Type | Description |
+|--------|------|-------------|
+| id | uuid | Primary Key |
+| case_number | text | Unique case number |
+| pdf_url | text | Uploaded PDF URL |
+| uploaded_by | text | Uploader name |
+| created_at | timestamp | Upload timestamp |
 
-MIT © JudgeAI Team
+---
+
+## `extracted_actions` Table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | uuid | Primary Key |
+| case_number | text | Extracted case number |
+| judgment_date | text | Judgment date |
+| department | text | Concerned department |
+| deadline | text | Compliance deadline |
+| directive | text | Legal directive |
+| confidence_score | float | AI confidence score |
+| pdf_url | text | Source PDF |
+| status | text | Extraction status |
+| created_at | timestamp | Timestamp |
+
+---
+
+# 🧪 Testing the Application
+
+1. Start backend server
+2. Start frontend application
+3. Open frontend in browser
+4. Upload a court judgment PDF
+5. Wait for AI analysis
+6. View extracted summaries and analytics
+
+---
+
+# 🚀 Deployment
+
+## Frontend
+- Vercel
+
+## Backend
+- Render
+
+## Database & Storage
+- Supabase
+
+---
+
+# 📷 Demo
+
+Frontend Demo:
+https://judge-ai-nu.vercel.app/login
+
+Backend API Docs:
+https://judgeai-x9c6.onrender.com/docs
+
+---
+
+# 📜 License
+
+MIT License © JudgeAI Team
