@@ -3,11 +3,14 @@ services:
     name: judgeai-backend
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT --workers 1 --limit-concurrency 20 --timeout-keep-alive 65 --backlog 128"
+    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT --workers 1 --limit-concurrency 20 --timeout-keep-alive 65 --backlog 128 --timeout 120"
     plan: free
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      # ── API Configuration ──────────────────────────────
+      - key: DEFAULT_REQUEST_TIMEOUT_SEC
+        value: "30"
       # ── PDF parsing limits (memory) ──────────────────
       - key: JUDGEAI_MAX_PARSE_PAGES
         value: "10"
@@ -26,9 +29,19 @@ services:
         value: "55"
       - key: JUDGEAI_LLM_RETRIES
         value: "1"
-      # ── Batch processing (Render free = 3; raise on paid tier) ─
+      # ── Batch processing (Render free = 1 worker) ───
       - key: JUDGEAI_BATCH_CONCURRENCY
-        value: "3"
+        value: "1"
+      # ── CORS configuration ──────────────────────────
+      - key: CORS_ALLOW_ORIGINS
+        value: ""
+      - key: CORS_ALLOW_ORIGIN_REGEX
+        value: "http://(localhost|127\\.0\\.0\\.1):\\d+|https://[a-zA-Z0-9-]+\\.vercel\\.app|https://judgeai.*\\.vercel\\.app"
       # ── Logging ──────────────────────────────────────
       - key: LOG_LEVEL
         value: "INFO"
+      # ── Render-specific settings ─────────────────────
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: RENDER
+        value: "true"

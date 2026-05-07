@@ -5,6 +5,7 @@ Legal governance assistant powered by Groq LLaMA3
 with Supabase storage and structured data extraction.
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -60,6 +61,7 @@ app = FastAPI(
     description="AI-powered legal governance assistant for court judgment analysis",
     version=APP_VERSION,
     docs_url="/docs",
+    openapi_url="/openapi.json",
     redoc_url="/redoc",
     lifespan=lifespan,
 )
@@ -96,7 +98,7 @@ if extra:
 
 cors_allow_origin_regex = os.getenv(
     "CORS_ALLOW_ORIGIN_REGEX",
-    r"http://(localhost|127\.0\.0\.1):\d+|https://.*\.vercel\.app",
+    r"http://(localhost|127\.0\.0\.1):\d+|https://[a-zA-Z0-9-]+\.vercel\.app|https://judgeai.*\.vercel\.app",
 )
 
 app.add_middleware(
@@ -123,25 +125,46 @@ app.include_router(search_router.router,  prefix="/api", tags=["Search"])
 # ── Health check (with DB ping) ───────────────────────────────
 @app.get("/", tags=["Health"])
 async def health_check():
+    """Primary health endpoint. Returns quickly even if DB is slow."""
+    import asyncio
+    
     uptime_sec = round(time.time() - _START_TIME, 1)
     db_ok = False
+    db_error = None
+    
     try:
+        # Use asyncio timeout to prevent hanging on DB issues
         from backend.config import get_supabase
-        get_supabase().table("cases").select("id").limit(1).execute()
-        db_ok = True
+        
+        async def check_db():
+            """Non-blocking DB check wrapped in timeout."""
+            try:
+                get_supabase().table("cases").select("id").limit(1).execute()
+                return True, None
+            except Exception as e:
+                return False, str(e)[:200]
+        
+        db_ok, db_error = await asyncio.wait_for(
+            asyncio.to_thread(check_db), timeout=5.0
+        )
+    except asyncio.TimeoutError:
+        _logger.warning("Health check DB ping timeout (>5s)")
+        db_error = "DB check timeout"
     except Exception as e:
         _logger.warning("Health check DB ping failed: %s", e)
+        db_error = str(e)[:200]
 
     return {
         "status": "operational" if db_ok else "degraded",
         "service": "JudgeAI API",
         "version": APP_VERSION,
         "uptime_sec": uptime_sec,
-        "db": "ok" if db_ok else "unreachable",
+        "db": "ok" if db_ok else ("unreachable" if db_error else "unknown"),
+        "db_error": db_error,
     }
 
 
 @app.get("/health", tags=["Health"])
 async def health_detail():
-    """Render health check endpoint — returns 200 unless DB is completely down."""
+    """Render health check endpoint — returns 200 unless completely broken."""
     return await health_check()

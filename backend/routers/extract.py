@@ -52,6 +52,7 @@ def _update_case_db_status(
     pdf_url: str,
     processing_status: str,
     processing_stage: str,
+    job_id: str = None,
     error: str = None,
     started_at: str = None,
     finished_at: str = None,
@@ -62,6 +63,9 @@ def _update_case_db_status(
             "processing_status": processing_status,
             "processing_stage": processing_stage,
         }
+        if job_id is not None:
+            # Store job_id for later retrieval if needed (future enhancement)
+            pass  # Currently stored in memory; can be added to JSONB metadata if needed
         if error is not None:
             update["processing_error"] = error[:500]
         if started_at is not None:
@@ -224,6 +228,7 @@ async def extract_actions_async(payload: ExtractRequest, background_tasks: Backg
         "error": None,
         "error_stage": None,
         "action_id": None,
+        "result": None,
     }
 
     # Best-effort case status update for dashboard UX

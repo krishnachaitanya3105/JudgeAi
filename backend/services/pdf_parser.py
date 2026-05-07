@@ -73,29 +73,70 @@ def _stream_pdf_to_tempfile(pdf_url: str) -> str:
 
     Streaming avoids loading the full PDF binary into RAM
     (critical for Render's 512 MB limit).
+    
+    Raises:
+        requests.RequestException: On network/timeout errors
+        ValueError: If response is not a valid PDF
     """
     logger.info(
         "[pdf_parser] Streaming PDF from %s… (rss=%.1f MB)", pdf_url[:80], _rss_mb()
     )
     t0 = time.monotonic()
-    response = requests.get(pdf_url, timeout=REQUEST_TIMEOUT_SEC, stream=True)
-    response.raise_for_status()
+    
+    try:
+        response = requests.get(
+            pdf_url, 
+            timeout=REQUEST_TIMEOUT_SEC, 
+            stream=True,
+            allow_redirects=True
+        )
+        response.raise_for_status()
+    except requests.Timeout as e:
+        raise ValueError(f"PDF download timeout after {REQUEST_TIMEOUT_SEC}s: {e}") from e
+    except requests.ConnectionError as e:
+        raise ValueError(f"PDF download connection error: {e}") from e
+    except requests.RequestException as e:
+        raise ValueError(f"PDF download failed: {e}") from e
+
+    # Validate content-type
+    content_type = response.headers.get('content-type', '').lower()
+    if 'pdf' not in content_type and 'octet-stream' not in content_type:
+        response.close()
+        raise ValueError(f"Invalid content-type: {content_type} (expected PDF)")
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     total_bytes = 0
+    max_bytes = 50_000_000  # 50 MB limit to prevent OOM on Render
+    
     try:
         for chunk in response.iter_content(chunk_size=STREAM_CHUNK_BYTES):
             if chunk:
-                tmp.write(chunk)
                 total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise ValueError(f"PDF file too large (>{max_bytes / 1_000_000:.1f} MB)")
+                tmp.write(chunk)
         tmp.flush()
+    except Exception as e:
+        tmp.close()
+        try:
+            os.unlink(tmp.name)
+        except:
+            pass
+        raise ValueError(f"PDF download/write error: {e}") from e
     finally:
         tmp.close()
         response.close()
 
+    elapsed = time.monotonic() - t0
+    if elapsed > REQUEST_TIMEOUT_SEC * 0.9:  # Warn if close to timeout
+        logger.warning(
+            "[pdf_parser] PDF download took %.2fs (near timeout of %.0fs)",
+            elapsed, REQUEST_TIMEOUT_SEC
+        )
+    
     logger.info(
         "[pdf_parser] Downloaded %.1f KB in %.2fs (rss=%.1f MB)",
-        total_bytes / 1024, time.monotonic() - t0, _rss_mb(),
+        total_bytes / 1024, elapsed, _rss_mb(),
     )
     return tmp.name
 
